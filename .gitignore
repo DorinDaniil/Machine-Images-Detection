@@ -197,3 +197,11 @@ cython_debug/
 checkpoint_dir/
 data/
 logs/
+# Project data and outputs
+data/
+checkpoints/
+logs/
+results/
+weights/
+*.pt
+!tests/**/*.pt

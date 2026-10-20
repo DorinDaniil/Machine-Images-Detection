@@ -1,0 +1,35 @@
+# CPU smoke run on a randomly initialised 2-block ViT. Checks the pipeline, not the quality.
+seed: 0
+
+model:
+  backbone: tiny-dinov2
+  train_last_blocks: 0
+  head_dim: 32
+  topk_ratio: 0.1
+
+data:
+  pairs_csv: data/aligned_smoke/aligned_pairs.csv
+  val_manifest: null
+  data_root: data
+  crop_size: 224
+  p_real: 0.3
+  p_full: 0.3
+  p_local: 0.4
+  alpha_range: [0.3, 1.0]
+  area_range: [0.05, 0.6]
+  degrade: {jpeg_p: 0.5, jpeg_quality: [40, 95], resize_p: 0.3, resize_range: [0.6, 1.0], blur_p: 0.2, blur_sigma: [0.3, 1.0], launder_p: 0.2}
+  num_workers: 0
+
+loss: {patch: 1.0, image: 1.0, dice: 0.5}
+
+training:
+  epochs: 1
+  batch_size: 2
+  lr: 1.0e-3
+  weight_decay: 0.0
+  warmup_steps: 2
+  amp: false
+  device: cpu
+  log_every: 1
+  checkpoint_dir: checkpoints/smoke
+  log_dir: logs/smoke
