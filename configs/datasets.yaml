@@ -1,77 +1,25 @@
-# Dataset registry. One entry = one source in the manifest.
-#
-#   python -m src.data.build_manifest --list
-#   python -m src.data.build_manifest --role train_real --out data/manifests/train_real.csv
-#   python -m src.data.build_manifest --role test --max-items 2000 --out data/manifests/test.csv
-#
-# kind: hf_parquet  any Hugging Face dataset with an image column, streamed, cap is exact
-#       hf_files    a Hugging Face repo of image files, labels from folder names
-#       custom      an adapter class in src/data/sources (special layouts, manual downloads)
-# role: train_real | calib_real | test   (benchmarks are test-only, never trained on)
-# Licenses and sizes: configs/data_sources_real.yaml, configs/data_sources_fake.yaml.
-# Extra entries can live in configs/datasets.d/*.yaml; they are merged into this list.
+# Dataset registry. Add a Hugging Face dataset with a few lines (kind hf_parquet / hf_files, see
+# src/data/sources/generic.py); special layouts use kind: custom with an adapter in src/data/sources.
+# role: train_real | calib_real | test.   The full registry with ~75 sources lives in branch data-registry.
 
 raw_root: data/raw
 
 datasets:
-  # ------------------------------------------------------------ real: photos
-  coco_val:            {kind: custom, role: train_real, max_items: 5000, notes: "COCO val2017, <=640 px"}
-  open_images_sample:  {kind: custom, role: train_real, max_items: 10000, notes: "Open Images val, ~1024 px"}
-  raise_raw:           {kind: custom, role: calib_real, max_items: 1000, notes: "DSLR TIFF, manual CSV step"}
+  coco_real:
+    kind: hf_parquet
+    role: train_real
+    repo: detection-datasets/coco
+    split: val
+    image_column: image
+    label: 0
+    content_type: photo
+    manifest_split: train
+    min_side: 0
+    max_items: 2000
+    notes: "COCO val2017 photos, <= 640 px, Flickr CC images; the only real source of the pilot"
 
-  # ------------------------------------------------------------ real: art / drawings
-  wikiart:             {kind: custom, role: train_real, max_items: 5000}
-  imagenet_sketch:     {kind: custom, role: train_real, max_items: 3000}
-  tu_berlin_sketches:  {kind: custom, role: calib_real, max_items: 2000, notes: "clean vector strokes, no camera trace"}
-
-  # ------------------------------------------------------------ real: graphics / logos / icons
-  logos:               {kind: custom, role: train_real, max_items: 5000, args: {sample: false}}
-  icons:               {kind: custom, role: train_real, max_items: 3000}
-
-  # ------------------------------------------------------------ real: text / documents / screenshots
-  rvl_cdip:            {kind: custom, role: train_real, max_items: 5000}
-  screenshots:         {kind: custom, role: train_real, max_items: 3000}
-
-  # ------------------------------------------------------------ real: biomedical / scientific
-  medmnist:            {kind: custom, role: train_real, max_items: 4000, notes: "224 px squares"}
-  patchcamelyon:       {kind: custom, role: train_real, max_items: 4000, notes: "96 px tiles"}
-  rocov2:              {kind: custom, role: train_real, max_items: 5000, notes: "radiology from papers, CC BY-NC-SA"}
-  bbbc:                {kind: custom, role: train_real, max_items: 3000}
-  chest_xray:          {kind: custom, role: train_real, max_items: 3000}
-  sci_figures:         {kind: custom, role: train_real, max_items: 5000, notes: "arXiv figures 1992-2021"}
-
-  # ------------------------------------------------------------ test benchmarks (real + fake, with masks where given)
-  dailybench:          {kind: custom, role: test, max_items: 3000, notes: "FLUX.2, Qwen-Image, Nano Banana 2, GPT-Image 2 + edits"}
-  mllm_bench:          {kind: custom, role: test, max_items: 3000, notes: "GPT Image 2, Nano Banana 2"}
-  community_forensics: {kind: custom, role: test, max_items: 3000}
-  so_fake:             {kind: custom, role: test, max_items: 3000, notes: "with masks"}
-  chameleon:           {kind: custom, role: test, max_items: 3000}
-  wildrf:              {kind: custom, role: test, max_items: 2000}
-  itw_sm:              {kind: custom, role: test, max_items: 2000}
-  openfake:            {kind: custom, role: test, max_items: 2000}
-  textfake:            {kind: custom, role: test, max_items: 2000, notes: "text-rich images"}
-  impostor:            {kind: custom, role: test, max_items: 2000, notes: "AI edits with masks"}
-  opensdid:            {kind: custom, role: test, max_items: 2000, notes: "global and local edits with masks"}
-  inpx:                {kind: custom, role: test, max_items: 2000, notes: "inpainting with the global VAE trace removed"}
-  aigibench:           {kind: custom, role: test, max_items: 2000}
-  genimage:            {kind: custom, role: test, max_items: 2000, notes: "older generators; reals JPEG, fakes PNG"}
-
-  # ------------------------------------------------------------ previous project and hand-collected cases
-  legacy_artifact:     {kind: custom, role: test, notes: "ArtiFact, local copy"}
-  legacy_defactify:    {kind: custom, role: test, notes: "Defactify 4, local copy"}
-  local_folder:        {kind: custom, role: test, notes: "own false positives: logos, text screenshots"}
-
-  # ------------------------------------------------------------ example of a generic entry (no code needed)
-  # some_hf_dataset:
-  #   kind: hf_parquet
-  #   role: test
-  #   repo: owner/name
-  #   split: train
-  #   image_column: image
-  #   label_column: label          # or label: 1
-  #   label_map: {real: 0, fake: 1}
-  #   generator_column: model      # or generator: flux.2
-  #   content_type: photo
-  #   manifest_split: test
-  #   min_side: 0
-  #   max_items: 2000
+  dailybench:
+    kind: custom
+    role: test
+    max_items: 2000
+    notes: "Apache-2.0. Reals + fakes by SD3.5, FLUX.1, FLUX.2, Qwen-Image, Z-Image, Nano Banana 2, GPT-Image 2, and edits by FLUX-Fill, Qwen-Image-Edit, Nano Banana 2, GPT-Image 2"
