@@ -1,17 +1,17 @@
 """PatchCamelyon (Veeling et al., 2018): H&E lymph-node histopathology patches from Camelyon16.
 
-HF dataset `1aurent/PatchCamelyon`: 327,680 patches in 17 parquet shards (13 train, 2 valid,
-2 test; ~20,000 patches / 470 MB each, 7.6 GB total). Only the valid + test shards (65,536
-patches) are used by default, which is plenty for a real-image pool. Shards are fetched in a
-fixed shuffled order, exported with their original bytes and deleted, so `max_items` is
-honoured to within one shard (~20k patches).
+HF dataset `1aurent/PatchCamelyon`: 327,680 patches in 17 parquet shards (13 train shards of
+~20,000 patches / 470 MB, 2 valid + 2 test shards of ~16,400 patches / 375 MB; 7.6 GB total).
+Only the valid + test shards (65,536 patches, 1.5 GB) are used, which is plenty for a
+real-image pool. Shards are fetched in a fixed shuffled order, exported with their original
+bytes and deleted, so `max_items` is honoured to within one shard (~16k patches).
 
 Resolution: 96x96 px at 10x magnification (downsampled from 40x whole-slide scans); far
 below the 512 px preference, so the detector must handle tiny inputs for this source.
 
 Layout: raw_root/patchcamelyon/images/<shard>_<row>.png|jpg
 
-License: CC0 1.0. Whole-slide scanner images from 2015-2016 (Radboud UMC, UMC Utrecht),
+License: CC0 1.0. Whole-slide scans from the Camelyon16 challenge (Radboud UMC, UMC Utrecht),
 no AI enhancement.
 """
 

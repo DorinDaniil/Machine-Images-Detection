@@ -15,7 +15,7 @@ as manifest rows. Adapters stay small: download, walk files, emit rows.
 
 from pathlib import Path
 
-from trace_detector.data.manifest import COLUMNS, CONTENT_TYPES, SPLITS
+from ..manifest import COLUMNS, CONTENT_TYPES, SPLITS
 
 REGISTRY: dict[str, type["Source"]] = {}
 

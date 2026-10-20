@@ -13,8 +13,9 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
 from .data import AlignedPairsDataset, ManifestDataset, filter_manifest, read_manifest
-from .dino_trace import TraceDetector, trace_loss
-from .evaluate_detector import pixel_scores
+from .evaluate import pixel_scores
+from .losses import trace_loss
+from .model import TraceDetector
 
 
 def load_config(path: str | Path) -> dict:

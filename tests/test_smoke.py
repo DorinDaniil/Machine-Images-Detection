@@ -14,14 +14,14 @@ import pandas as pd
 import torch
 from PIL import Image
 
-from trace_detector.calibrate_detector import calibrate
-from trace_detector.data import AlignedPairsDataset, compose, random_region_mask, read_manifest, write_manifest
-from trace_detector.data.dataset import PAIR_COLUMNS
-from trace_detector.dino_trace import TraceDetector, trace_loss
-from trace_detector.evaluate_detector import load_model, precision_at_recall, score_manifest, summarize
-from trace_detector.train_detector import build_loaders, load_config, train_model
+from src.data import AlignedPairsDataset, compose, random_region_mask, read_manifest, write_manifest
+from src.data.dataset import PAIR_COLUMNS
+from src.evaluate import calibrate, precision_at_recall, score_manifest, summarize
+from src.losses import trace_loss
+from src.model import TraceDetector, load_model
+from src.train import build_loaders, load_config, train_model
 
-CONFIG = Path(__file__).resolve().parents[1] / "trace_detector" / "configs" / "train_config_smoke.yaml"
+CONFIG = Path(__file__).resolve().parents[1] / "configs" / "smoke.yaml"
 
 
 def smooth_image(rng: np.random.Generator, size: int = 256) -> np.ndarray:
@@ -123,3 +123,24 @@ def test_precision_at_recall():
     scores = np.array([0.9, 0.8, 0.7, 0.2, 0.1])
     assert precision_at_recall(labels, scores, 0.5) == 1.0
     assert abs(precision_at_recall(labels, scores, 1.0) - 2 / 3) < 1e-9
+
+
+def test_registry_builds_every_source():
+    from src.data.registry import build_source, load_registry
+
+    reg = load_registry(Path(__file__).resolve().parents[1] / "configs" / "datasets.yaml")
+    assert reg["datasets"]
+    for name, entry in reg["datasets"].items():
+        source, _ = build_source(name, {k: v for k, v in entry.items() if k != "role"})
+        assert source.name == name
+
+
+def test_generic_hf_parquet_rows(tmp_path):
+    from src.data.sources.generic import HFParquetSource
+
+    src = HFParquetSource(name="demo", repo="x/y", content_type="photo", label=1, generator="flux.2", manifest_split="test")
+    folder = tmp_path / "demo"
+    folder.mkdir()
+    (folder / "index.csv").write_text("file,mask,label,generator\n00000001.jpg,,1,flux.2\n00000002.png,00000002_mask.png,1,flux.2\n")
+    rows = src.rows(tmp_path)
+    assert len(rows) == 2 and rows[1]["mask_path"].endswith("00000002_mask.png") and rows[0]["generator"] == "flux.2"

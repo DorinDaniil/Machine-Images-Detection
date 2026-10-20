@@ -1,18 +1,19 @@
-"""Train TraceDetector on aligned pairs.
-
-    python -m trace_detector.run_train_detector --config trace_detector/configs/train_config_detector.yaml
-"""
+"""python scripts/run_train.py --config configs/train.yaml [--resume]"""
 
 import argparse
+import sys
+from pathlib import Path
 
 import torch
 
-from .train_detector import build_loaders, build_model, load_config, train_model
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from src.train import build_loaders, build_model, load_config, train_model  # noqa: E402
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--config", required=True, help="YAML training config")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", required=True)
     parser.add_argument("--pairs-csv", default=None, help="override data.pairs_csv")
     parser.add_argument("--resume", action="store_true", help="continue from <checkpoint_dir>/last.pt")
     args = parser.parse_args()

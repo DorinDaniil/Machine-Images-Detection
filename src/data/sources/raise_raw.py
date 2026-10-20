@@ -52,8 +52,8 @@ class RaiseRaw(Source):
         if not urls:
             print(
                 f"[{self.name}] manual step: get the RAISE CSV from {self.url}download.html (web form)\n"
-                f"  and save it as {root}/RAISE.csv, then rerun; or put camera-original images\n"
-                f"  (any layout, jpg/png/tif) under {root}/images/."
+                f"  and save it as {root / 'RAISE.csv'}, then rerun; or put camera-original images\n"
+                f"  (any layout, jpg/png/tif) under {root / 'images'}."
             )
             return
         if max_items is None:

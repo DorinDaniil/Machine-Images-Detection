@@ -6,7 +6,7 @@ For every real row of a manifest:
 and one line in <out>/aligned_pairs.csv with columns
     pair_dir, decoders, content_type, source, split
 
-    python -m data_tools.prepare_aligned_negatives --manifest data/manifests/train_real.csv \
+    python -m src.data.prepare_pairs --manifest data/manifests/train_real.csv \
         --out data/aligned --decoders sd15,sdxl,flux --device cuda
 """
 
@@ -20,8 +20,9 @@ import torch
 from PIL import Image
 from tqdm import tqdm
 
-from trace_detector.data import DecoderBank, filter_manifest, read_manifest
-from trace_detector.data.dataset import PAIR_COLUMNS
+from .dataset import PAIR_COLUMNS
+from .decoders import DecoderBank
+from .manifest import filter_manifest, read_manifest
 
 DTYPES = {"float32": torch.float32, "float16": torch.float16, "bfloat16": torch.bfloat16}
 

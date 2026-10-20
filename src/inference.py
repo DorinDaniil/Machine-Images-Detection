@@ -9,12 +9,12 @@ import torch.nn.functional as F
 from PIL import Image
 
 from .data.dataset import fit_to_multiple, to_tensor
-from .dino_trace import TraceDetector
+from .model import TraceDetector
 
 
 class TraceDetectorInference:
     """
-    detector = TraceDetectorInference("weights/trace_detector.pt", device="cuda")
+    detector = TraceDetectorInference("checkpoints/run/best.pt", device="cuda")
     result = detector.predict(Image.open("photo.jpg"))
     result["score"]     probability that the image contains generated content
     result["map"]       float32 [H, W] per-pixel probability, same size as the analysed image

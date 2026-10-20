@@ -1,6 +1,6 @@
-"""Score a manifest and summarise metrics per source, generator and content type."""
+"""Scoring, metrics per group, and thresholds calibrated on real images."""
 
-from pathlib import Path
+import math
 
 import numpy as np
 import pandas as pd
@@ -10,7 +10,7 @@ from sklearn.metrics import average_precision_score, roc_auc_score
 from torch.utils.data import DataLoader
 
 from .data import ManifestDataset
-from .dino_trace import TraceDetector
+from .model import TraceDetector
 
 RECALL_LEVELS = (0.3, 0.5, 0.7)
 
@@ -26,25 +26,17 @@ def pixel_scores(patch_logits: torch.Tensor, target: torch.Tensor, threshold: fl
 
 
 @torch.no_grad()
-def score_manifest(
-    model: TraceDetector,
-    df: pd.DataFrame,
-    device: torch.device,
-    max_side: int = 1024,
-    num_workers: int = 4,
-    amp: bool = True,
-) -> pd.DataFrame:
-    """Adds columns score, pixel_f1, pixel_iou (NaN where the row has no mask)."""
+def score_manifest(model: TraceDetector, df: pd.DataFrame, device: torch.device, max_side: int = 1024,
+                   num_workers: int = 4, amp: bool = True) -> pd.DataFrame:
+    """Adds columns score, pixel_f1, pixel_iou (NaN where the row has no mask). One image per step, native size."""
     model.eval().to(device)
     loader = DataLoader(ManifestDataset(df, model.patch_size, None, max_side), batch_size=1, num_workers=num_workers)
-    scores = np.full(len(df), np.nan)
-    f1s, ious = np.full(len(df), np.nan), np.full(len(df), np.nan)
+    scores, f1s, ious = (np.full(len(df), np.nan) for _ in range(3))
 
     for batch in loader:
         idx = int(batch["index"])
-        image = batch["image"].to(device)
         with torch.autocast(device.type, dtype=torch.bfloat16, enabled=amp and device.type == "cuda"):
-            out = model(image)
+            out = model(batch["image"].to(device))
         scores[idx] = torch.sigmoid(out["image_logit"].float()).item()
         if bool(batch["has_mask"][0]):
             f1, iou = pixel_scores(out["patch_logits"].float(), batch["mask"].to(device))
@@ -60,11 +52,31 @@ def precision_at_recall(labels: np.ndarray, scores: np.ndarray, recall: float) -
     order = np.argsort(-scores)
     labels = labels[order]
     tp = np.cumsum(labels)
-    n_pos = labels.sum()
-    if n_pos == 0:
+    if labels.sum() == 0:
         return float("nan")
-    k = int(np.argmax(tp / n_pos >= recall))  # first index reaching the recall
+    k = int(np.argmax(tp / labels.sum() >= recall))
     return float(tp[k] / (k + 1))
+
+
+def conformal_threshold(scores: np.ndarray, alpha: float) -> float:
+    """ceil((n + 1)(1 - alpha))-th smallest real score: a new real image exceeds it with probability <= alpha."""
+    s = np.sort(scores)
+    k = math.ceil((len(s) + 1) * (1 - alpha)) - 1
+    return float(s[k]) if k < len(s) else float("inf")
+
+
+def calibrate(scored_real: pd.DataFrame, alpha: float, min_per_type: int = 200) -> dict:
+    """Global threshold plus one per content type where enough real images exist."""
+    return {
+        "alpha": alpha,
+        "n": int(len(scored_real)),
+        "global": conformal_threshold(scored_real["score"].to_numpy(), alpha),
+        "per_content_type": {
+            ct: conformal_threshold(g["score"].to_numpy(), alpha)
+            for ct, g in scored_real.groupby("content_type")
+            if len(g) >= min_per_type
+        },
+    }
 
 
 def resolve_threshold(thresholds: dict | None, content_type: str) -> float:
@@ -75,13 +87,12 @@ def resolve_threshold(thresholds: dict | None, content_type: str) -> float:
 
 def _group_metrics(g: pd.DataFrame, thresholds: dict | None) -> dict:
     y, s = g["label"].to_numpy(), g["score"].to_numpy()
-    thr = np.array([resolve_threshold(thresholds, ct) for ct in g["content_type"]])
-    pred = s >= thr
+    pred = s >= np.array([resolve_threshold(thresholds, ct) for ct in g["content_type"]])
     row = {"n_real": int((y == 0).sum()), "n_fake": int((y == 1).sum())}
     if row["n_real"] and row["n_fake"]:
         row["auroc"] = roc_auc_score(y, s)
         row["ap"] = average_precision_score(y, s)
-        row["bal_acc"] = 0.5 * ((pred[y == 1]).mean() + (~pred[y == 0]).mean())
+        row["bal_acc"] = 0.5 * (pred[y == 1].mean() + (~pred[y == 0]).mean())
         for r in RECALL_LEVELS:
             row[f"prec@rec{r}"] = precision_at_recall(y, s, r)
     if row["n_fake"]:
@@ -95,27 +106,19 @@ def _group_metrics(g: pd.DataFrame, thresholds: dict | None) -> dict:
 
 
 def summarize(scored: pd.DataFrame, thresholds: dict | None = None) -> pd.DataFrame:
-    """One row for ALL, then per content type, per source and per generator."""
+    """One row for ALL, then per content type, source and generator."""
     rows = [{"group": "ALL", **_group_metrics(scored, thresholds)}]
     for column in ("content_type", "source", "generator"):
         for value, g in scored.groupby(column):
-            if value == "":
-                continue
-            rows.append({"group": f"{column}={value}", **_group_metrics(g, thresholds)})
+            if value != "":
+                rows.append({"group": f"{column}={value}", **_group_metrics(g, thresholds)})
     return pd.DataFrame(rows)
 
 
 def to_markdown(summary: pd.DataFrame) -> str:
-    cols = [c for c in summary.columns]
+    cols = list(summary.columns)
     lines = ["| " + " | ".join(cols) + " |", "|" + "---|" * len(cols)]
     for _, r in summary.iterrows():
-        cells = [f"{v:.3f}" if isinstance(v, float) and not np.isnan(v) else ("" if isinstance(v, float) else str(v)) for v in r]
+        cells = ["" if isinstance(v, float) and np.isnan(v) else f"{v:.3f}" if isinstance(v, float) else str(v) for v in r]
         lines.append("| " + " | ".join(cells) + " |")
     return "\n".join(lines)
-
-
-def load_model(weights: str | Path, device: torch.device) -> TraceDetector:
-    payload = torch.load(weights, map_location="cpu", weights_only=False)
-    model = TraceDetector.from_config(payload["model_cfg"])
-    model.load_trainable_state_dict(payload["state_dict"])
-    return model.to(device).eval()

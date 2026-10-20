@@ -8,7 +8,7 @@ model:
   topk_ratio: 0.05            # image score = mean of the top 5 % patch logits
 
 data:
-  pairs_csv: data/aligned/aligned_pairs.csv   # from data_tools/prepare_aligned_negatives.py
+  pairs_csv: data/aligned/aligned_pairs.csv   # from src/data/prepare_pairs.py
   val_manifest: null          # optional manifest with split=val (real + fakes with masks)
   data_root: data
   crop_size: 512              # native-resolution crops, no resizing
@@ -41,5 +41,5 @@ training:
   amp: true
   device: cuda
   log_every: 50
-  checkpoint_dir: checkpoints/trace_dinov3_b16
-  log_dir: logs/trace_dinov3_b16
+  checkpoint_dir: checkpoints/dinov3_b16
+  log_dir: logs/dinov3_b16

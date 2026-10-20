@@ -11,7 +11,7 @@ For every real row (label=0) of a manifest writes <out>/<pipeline>/<id>/image.pn
 Images are shrunk to --max-side (never enlarged), then the right/bottom edges are cropped to a
 multiple of 8 (16 for FLUX), so no extra resampling. CSV paths start with --out.
 
-    python -m data_tools.generate_partial_fakes --manifest data/manifests/test_real.csv \
+    python -m src.data.generate_partial --manifest data/manifests/test_real.csv \
         --input-split test --out data/partial_fakes --pipeline sdxl-inpaint --mode inpaint --limit 500
 """
 
@@ -25,8 +25,8 @@ import torch
 from PIL import Image
 from tqdm import tqdm
 
-from trace_detector.data import filter_manifest, random_region_mask, read_manifest, write_manifest
-from trace_detector.data.manifest import COLUMNS, SPLITS
+from .manifest import COLUMNS, SPLITS, filter_manifest, read_manifest, write_manifest
+from .synth import random_region_mask
 
 DTYPES = {"float32": torch.float32, "float16": torch.float16, "bfloat16": torch.bfloat16}
 MIN_SIDE = 64  # smaller images are skipped

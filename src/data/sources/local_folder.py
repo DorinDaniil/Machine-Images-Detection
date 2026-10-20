@@ -10,7 +10,7 @@ Layout under raw_root/local_folder/:
 
 from pathlib import Path
 
-from trace_detector.data.manifest import CONTENT_TYPES
+from ..manifest import CONTENT_TYPES
 
 from .base import Source, make_row, register
 

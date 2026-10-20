@@ -1,0 +1,14 @@
+weights: checkpoints/dinov3_b16/best.pt
+manifests:
+  - data/manifests/test.csv
+data_root: data
+split: test
+max_side: 1024              # longer side shrunk to this, then floored to the patch size
+num_workers: 4
+device: cuda
+out_dir: results/dinov3_b16
+
+# optional: real-only manifest for thresholds with FPR <= alpha (per content type when enough images)
+calib_manifest: null        # e.g. data/manifests/calib_real.csv
+calib_split: calib
+alpha: 0.01

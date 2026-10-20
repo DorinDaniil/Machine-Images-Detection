@@ -1,0 +1,217 @@
+# Real (human-made) image sources, label 0. One adapter per entry in src/data/sources/<name>.py.
+# Build a manifest:
+#   python -m src.data.build_manifest --datasets coco_val,wikiart --max-items 2000 \
+#       --out data/manifests/real.csv
+#
+# download: auto   = download() fetches everything itself
+#           manual = needs a manual step first (download() prints what to do and the layout)
+# size: full download of what the adapter uses. For HF parquet sources the cap
+#   (--max-items) is honoured to within one shard; zip/npz sources download the whole
+#   archive and only cap the extraction.
+# Every adapter takes `split` (default "train"); parquet adapters with a resolution filter
+# take `min_side` (default 512 px on the short side).
+# HF ids and file layouts were verified on 2026-10-20 with HfApi.dataset_info / list_repo_files
+# and parquet footers; nothing was downloaded during development.
+
+sources:
+  # ---------------------------------------------------------------- photos
+  - name: coco_val
+    hf_id: phiyodr/coco2017            # 1 MB index parquet only; images come from the url below
+    url: http://images.cocodataset.org/val2017/
+    license: Flickr per-image CC licenses (BY, BY-SA, BY-NC, BY-NC-SA, BY-ND, BY-NC-ND, no known restrictions, US gov); annotations CC BY 4.0
+    size: 5,000 images, ~0.8 GB
+    resolution: <= 640 px long side (typ. 640x480, 640x427); 512 px short side not reachable
+    content_type: photo
+    download: auto
+    notes: >-
+      Per-image download, so the cap is exact. Flickr photos up to 2014 from consumer
+      cameras/phones, Flickr-recompressed JPEG; no AI ISP. Overlaps with real halves of
+      COCO-based fake benchmarks (e.g. Defactify uses COCO captions/images).
+
+  - name: open_images_sample
+    hf_id: finedet/openimages          # validation split only, 15 shards
+    url: https://storage.googleapis.com/openimages/web/index.html
+    license: images listed as CC BY 2.0 (not warranted by Google); mirror/annotations CC BY 4.0
+    size: 37,306 images, 11.6 GB (15 shards of ~2,500 images / 780 MB)
+    resolution: CVDF copies, mostly 1024 px long side (1024x768, 1024x683), some larger
+    content_type: photo
+    download: auto
+    notes: >-
+      Flickr uploads up to ~2016; some edited/HDR photos, no generative AI. Only images with
+      box annotations are in this mirror.
+
+  - name: raise_raw
+    url: http://loki.disi.unitn.it/RAISE/
+    license: free for research, cite Dang-Nguyen et al. (ACM MMSys 2015)
+    size: 8,156 images; TIFFs ~30-50 MB each (~300 GB for all), always cap
+    resolution: 3008x2000 (D40), 4288x2848 (D90), 4928x3264 (D7000)
+    content_type: photo
+    download: manual
+    notes: >-
+      Manual step: the file list (CSV with NEF/TIFF columns) comes from a web form; save it
+      as raw_root/raise_raw/RAISE.csv, then download() fetches the TIFF column itself. DSLR raws developed
+      to uncompressed TIFF: never JPEG-compressed, no phone ISP, no AI enhancement. Any other
+      camera-original set (e.g. Dresden Image Database) can be dropped into
+      raw_root/raise_raw/images/. TIFF bit depth and the TIFF host were not verified.
+
+  # ---------------------------------------------------------------- art / drawings
+  - name: wikiart
+    hf_id: huggan/wikiart
+    license: unknown on the card; public-domain works plus copyrighted modern art (fair use)
+    size: 81,444 images, 33.7 GB (72 shards)
+    resolution: short side mostly 1382 px (rescaled), some smaller
+    content_type: art
+    download: auto
+    notes: >-
+      Photos/scans of physical artworks plus some digital art, collected ~2016, before
+      diffusion models. Museum photography may include ordinary camera processing/retouching.
+
+  - name: imagenet_sketch
+    hf_id: vaughankraska/imagenet_sketch   # parquet copy of songweig/imagenet_sketch (script + 7.6 GB zip)
+    license: unknown (Google Image search results, 2019)
+    size: 50,889 images, 8.0 GB (17 shards, rows pre-shuffled)
+    resolution: very mixed, ~150-2000 px; about half pass the 512 px filter
+    content_type: art
+    download: auto
+    notes: >-
+      Pencil sketches, line drawings, some digital drawings and photographed sketches; web
+      JPEG/PNG. Collected in 2019, no generative AI.
+
+  - name: tu_berlin_sketches
+    hf_id: kmewhort/tu-berlin-png
+    url: https://cybertron.cg.tu-berlin.de/eitz/projects/classifysketch/   # returned 404 in Oct 2026
+    license: CC BY 4.0
+    size: 20,000 images, 0.59 GB (3 shards)
+    resolution: 1111x1111 PNG
+    content_type: art
+    download: auto
+    notes: >-
+      Non-expert sketches (2011, Mechanical Turk) rendered from SVG strokes: clean black lines
+      on white, no camera or JPEG traces at all.
+
+  # ---------------------------------------------------------------- graphics
+  - name: logos
+    url: https://data.vision.ee.ethz.ch/sagea/lld/   # file LLD-logo_files.zip (cleaned, single files)
+    license: academic research only; copyright with the logo owners
+    size: 122,920 logos, 6.66 GB zip (27 MB official sample zip with sample=True)
+    resolution: 64-400 px, mostly 400x400
+    content_type: graphics
+    download: auto
+    notes: >-
+      Twitter profile logos scraped in Aug 2017 (pre-generative). One zip, so the cap only
+      limits extraction. Files are as served by Twitter (recompressed). No HF parquet mirror
+      of LLD-logo was found; diwank/lld is a 17 GB HDF5 behind a loading script.
+
+  - name: icons
+    hf_id: Norod78/microsoft-fluentui-emoji-768 + ppierzc/ios-app-icons
+    license: Fluent emoji MIT; iOS app icons copyrighted by app owners (card says openrail), research only
+    size: 7,564 + 1,919 images, 0.70 + 0.34 GB
+    resolution: 768x768 (Fluent emoji, SVG rasterised) and 512x512 (app icons)
+    content_type: graphics
+    download: auto
+    notes: >-
+      Fluent emoji in Color/Flat/High-Contrast styles (no 3D renders in this copy). App icons
+      from the iOS Icon Gallery collected Dec 2023 (captions are BLIP-generated); a few recent
+      icons might have been made with generative tools. No Icons-50 mirror was found on the
+      Hub; extra icon folders can be dropped into raw_root/icons/<name>/.
+
+  # ---------------------------------------------------------------- text / screenshots
+  - name: rvl_cdip
+    hf_id: chainyo/rvl-cdip            # parquet copy of aharley/rvl_cdip (script + 38.8 GB tar.gz); test split only
+    license: other (IIT-CDIP / Legacy Tobacco Document Library terms), research use
+    size: 40,000 images, 4.6 GB (15 test shards)
+    resolution: grayscale TIFF, largest side <= 1000 px, typ. 754x1000
+    content_type: text
+    download: auto
+    notes: >-
+      Old office scans (letters, forms, memos, invoices, scientific reports) with fax and
+      photocopy noise; no AI processing. Very low DPI compared to modern scans.
+
+  - name: screenshots
+    hf_id: bevaya/RICO-Screen2Words
+    license: CC BY 4.0
+    size: 22,417 screens, 2.5 GB (12 shards; each row also has an icon and a semantic map, not exported)
+    resolution: 1080x1920 or 1440x2560 JPEG
+    content_type: screenshot
+    download: auto
+    notes: >-
+      Android app UIs captured in 2017 (Rico); contain rendered text, in-app photos and ads.
+      No desktop/web screenshots: biglab/webui-* (license other) ship as 4.3 GB split zips.
+
+  # ---------------------------------------------------------------- biomedical / scientific
+  - name: medmnist
+    url: https://zenodo.org/records/10519652   # MedMNIST+ npz files
+    license: CC BY 4.0 (each subset also inherits its source dataset's terms)
+    size: default subsets at 224 px ~2.8 GB of npz (blood 1.5 GB, derma 1.1 GB, retina 128 MB, breast 31 MB)
+    resolution: 28, 64, 128 or 224 px squares (default 224)
+    content_type: biomed
+    download: auto
+    notes: >-
+      npz files are downloaded whole and converted to PNG; the cap limits export only. All
+      images were center-cropped and resampled by MedMNIST (interpolation traces, no sensor
+      traces). pneumoniamnist duplicates chest_xray (Kermany) and is not in the defaults;
+      pathmnist is 12.6 GB at 224 px. HF albertvillanova/medmnist-v2 only has 28 px.
+
+  - name: patchcamelyon
+    hf_id: 1aurent/PatchCamelyon       # valid + test shards only
+    license: CC0 1.0
+    size: 65,536 patches, 1.5 GB (4 shards)
+    resolution: 96x96
+    content_type: biomed
+    download: auto
+    notes: >-
+      H&E lymph-node patches from Camelyon16 whole-slide scans, downsampled to 10x. Tiny
+      inputs; useful for low-resolution histology robustness, not for 512 px training.
+
+  - name: rocov2
+    hf_id: eltorio/ROCOv2-radiology
+    license: CC BY-NC-SA 4.0 (card); source PMC OA articles are CC BY or CC BY-NC
+    size: 79,789 images, 18.6 GB (39 shards)
+    resolution: mixed, ~220-1600 px (typ. 500-800); ~60% pass the 512 px filter
+    content_type: biomed
+    download: auto
+    notes: >-
+      Radiology figures cut from PubMed Central papers (CT, MRI, X-ray, US, PET), with arrows,
+      labels and crops: closest match to what the detector sees in submitted papers. PMC
+      snapshot date not verified (published 2024), so a few synthetic figures in the newest
+      articles cannot be ruled out.
+
+  - name: bbbc
+    url: https://bbbc.broadinstitute.org/   # zips on data.broadinstitute.org/bbbc/
+    license: BBBC038 CC0; BBBC041 CC BY-NC-SA 3.0
+    size: BBBC038 stage1 735 images (~90 MB, unverified); BBBC041 1,364 images (size unverified)
+    resolution: BBBC038 256x256 to 1040x1388 PNG; BBBC041 ~1600x1200 (unverified)
+    content_type: biomed
+    download: auto
+    notes: >-
+      Links taken from the official set pages; data.broadinstitute.org timed out from the
+      development machine, so the downloads are untested (on failure the adapter prints the
+      manual layout raw_root/bbbc/zips/<set>.zip). Fluorescence, brightfield and H&E nuclei
+      (BBBC038, Kaggle DSB 2018) and Giemsa malaria smears (BBBC041). BBBC005 (simulated) and
+      BBBC039 (16-bit TIFF) are deliberately excluded.
+
+  - name: chest_xray
+    hf_id: hf-vision/chest-xray-pneumonia
+    url: https://data.mendeley.com/datasets/rscbjbr9sj/2
+    license: CC BY 4.0
+    size: 5,856 images, 1.2 GB (9 shards)
+    resolution: ~1000-2100 px long side, 8-bit grayscale JPEG
+    content_type: biomed
+    download: auto
+    notes: >-
+      Pediatric AP radiographs (Kermany et al. 2018), vendor post-processing only. Adult
+      alternative: timm/nih-chest-xray-14 (112k PNG at 1024x1024, 21.6 GB, NIH terms).
+
+  - name: sci_figures
+    hf_id: MMInstruction/ArxivCap
+    license: card CC BY 4.0; each figure keeps its arXiv paper license (often arXiv non-exclusive), research use
+    size: pre-2022 subset 4,509 shards / 572 GB (adapter fetches 20 shards when no cap is given)
+    resolution: mixed, often 1000-2500 px (card example 2016x1063)
+    content_type: graphics
+    download: auto
+    notes: >-
+      arXiv figures 1992-2021 only (shards arXiv_src_YYMM with YY < 22), to stay clear of
+      generative illustrations. Mostly plots/charts/diagrams, also photos and micrographs;
+      all tagged graphics (no per-figure biomed flag). Figures were rasterised from PDF/EPS
+      by the ArxivCap pipeline. Not used: SciCap (CrowdAILab/scicap, 27 GB split zip,
+      CC BY-NC-SA 4.0) and DocFigure (not on the Hub).

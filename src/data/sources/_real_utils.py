@@ -57,11 +57,11 @@ def hub_files(repo_id: str, prefixes: tuple[str, ...], suffix: str = ".parquet")
     return sorted(f for f in files if f.startswith(prefixes) and f.endswith(suffix))
 
 
-def export_parquet_images(parquet: Path, out_dir: Path, image_column: str = "image", min_side: int = 0) -> int:
-    """Save every image of one parquet shard; the image cell is {bytes, path} or raw bytes."""
+def export_parquet_images(parquet: Path, out_dir: Path, min_side: int = 0) -> int:
+    """Save every image of a shard's `image` column; a cell is {bytes, path} or raw bytes."""
     count = 0
     index = 0
-    for batch in pq.ParquetFile(parquet).iter_batches(batch_size=64, columns=[image_column]):
+    for batch in pq.ParquetFile(parquet).iter_batches(batch_size=64, columns=["image"]):
         for cell in batch.column(0).to_pylist():
             data = cell.get("bytes") if isinstance(cell, dict) else cell
             if data and save_image_bytes(data, out_dir, f"{parquet.stem}_{index:06d}", min_side):
@@ -75,7 +75,6 @@ def fetch_hub_parquet(
     files: list[str],
     out_dir: Path,
     max_items: int | None,
-    image_column: str = "image",
     min_side: int = 0,
     max_shards: int | None = None,
     export: Callable[[Path, Path], int] | None = None,
@@ -102,7 +101,7 @@ def fetch_hub_parquet(
         print(f"   {repo_id}: {filename}")
         local = Path(hf_hub_download(repo_id, filename, repo_type="dataset", local_dir=tmp_dir))
         if export is None:
-            count = export_parquet_images(local, out_dir, image_column, min_side)
+            count = export_parquet_images(local, out_dir, min_side)
         else:
             count = export(local, out_dir)
         marker.write_text(str(count))
