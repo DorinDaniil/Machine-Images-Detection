@@ -1,0 +1,523 @@
+# Clean human-made / camera images (label 0) on the Hugging Face Hub, merged into configs/datasets.yaml
+# by src/data/registry.py. Complements configs/data_sources_real.yaml (nothing here duplicates COCO,
+# Open Images, RAISE, WikiArt, ImageNet-Sketch, TU-Berlin, LLD, icons, RVL-CDIP, Rico, MedMNIST,
+# PatchCamelyon, ROCOv2, BBBC, chest X-ray or ArxivCap).
+#
+#   python -m src.data.build_manifest --role train_real --datasets div2k_hr,pmc_microscopy_pre2022 --out data/manifests/real_hf.csv
+#   python -m src.data.build_manifest --role calib_real --out data/manifests/calib_real_hf.csv
+#
+# Verified on 2026-10-20 without downloading any image: HfApi.dataset_info (license, gated, file
+# sizes), list_repo_files, the datasets-server API (splits, size, first-rows widths/heights) and
+# parquet footers / metadata columns read through HfFileSystem. For kind custom (adapter
+# hf_parquet_select) a metadata-only dry run checked the image column type and counted the rows that
+# pass the filters. min_side and the content-hash dedup are applied only at download time.
+# All repos are public and not gated (no token needed).
+#
+# Disk at the default caps: ~19 GB for everything (sizes per entry in the notes) - pull per domain or
+# pass --max-items. Images are always written with their original bytes.
+#
+# kind custom = adapter hf_parquet_select (src/data/sources/hf_parquet_select.py): pyarrow range reads
+# of the wanted row groups only; shards in a seeded random order with a per_file cap (most of these
+# repos are sorted by class / department / label), metadata filters (where, max_year) and a sha1
+# dedup for QA-style repos that repeat the same image on many rows. Top-level `repo` is informational.
+
+datasets:
+  # ================================================================== photos
+  div2k_hr:
+    kind: hf_parquet
+    role: train_real
+    repo: bdanko/DIV2K_train_HR
+    split: train
+    image_column: hr
+    label: 0
+    content_type: photo
+    manifest_split: train
+    min_side: 512
+    max_items: 300
+    notes: >-
+      DIV2K train HR (NTIRE 2017, Agustsson & Timofte): 800 web photos picked for diversity, 2040 px
+      long side PNG (2040x1356 .. 2040x1848). Card has no license; DIV2K terms = academic research
+      only. Parquet copy uploaded 2026-04, 8 shards / 3.5 GB (4.4 MB per image, ~1.3 GB at the cap).
+      Pre-diffusion (2017); web-sourced, possibly resized by the DIV2K authors (no sensor-level claims).
+
+  vizwiz_phone_photos:
+    kind: hf_parquet
+    role: calib_real
+    repo: lmms-lab/VizWiz-Caps
+    split: val
+    image_column: image
+    label: 0
+    content_type: photo
+    manifest_split: calib
+    min_side: 480
+    max_items: 2000
+    notes: >-
+      VizWiz-Captions val (Gurari et al., ECCV 2020): smartphone photos taken by blind users in
+      2016-2019, often blurred, tilted, over/under-exposed, many with text (labels, screens). VizWiz
+      is CC BY 4.0 per vizwiz.org (the card gives no license). 7,750 rows / 3.5 GB, one row per image; sizes
+      seen 360x480 .. 1224x1632. Held out for threshold calibration on hard consumer photos (~1 GB
+      at the cap). No generative AI; phone ISP processing only.
+
+  ffhq_faces:
+    kind: hf_files
+    role: train_real
+    repo: marcosv/ffhq-dataset
+    allow_patterns: ["Part1/00???.png"]
+    label: 0
+    content_type: photo
+    manifest_split: train
+    min_side: 0
+    max_items: 1000
+    notes: >-
+      FFHQ (NVIDIA, 2019): Flickr portraits under permissive licenses, aligned and cropped with dlib
+      to 1024x1024 PNG. Dataset license CC BY-NC-SA 4.0 (card: "cc", links the original); images
+      keep their Flickr licenses. The pattern takes the first 1,000 of 70,000 files (1.35 GB). Not
+      camera-original: alignment resamples the photo, and out-of-frame areas are filled with a
+      blurred reflection - real faces, but with a known processing signature.
+
+  met_photographs:
+    kind: custom
+    adapter: hf_parquet_select
+    role: train_real
+    repo: metmuseum/openaccess
+    args:
+      repo: metmuseum/openaccess
+      files: ["default/train/openaccess-*.parquet"]
+      image_column: image
+      where: {classification: [Photographs]}
+      per_file: 100
+      min_side: 512
+      content_type: photo
+      manifest_split: train
+    max_items: 400
+    notes: >-
+      The Met Open Access, CC0 1.0. 52 shards (260k objects, 394 GB, 25 row groups of 200 rows,
+      0.1-0.6 GB each) sorted by department; classification Photographs sits in ~10 shards (21-22,
+      31-33, 42-47, 51; >14k rows): digitised 19th-20th c. photographic prints at full resolution
+      (e.g. 1624x2072). Dry run: 1,690 matching rows in the first 20 shards of the seeded order, cap
+      reached there (~90 s of metadata reads). Museum digitisation, no generative AI. ~3 MB per image
+      (~1.2 GB at the cap; the 0.1-0.6 GB image column of each picked row group is streamed).
+
+  # ================================================================== social media
+  memotion_memes:
+    kind: hf_parquet
+    role: train_real
+    repo: Ahren09/MMSoc_Memotion
+    split: train
+    image_column: image
+    label: 0
+    content_type: other
+    manifest_split: train
+    min_side: 0
+    max_items: 3000
+    notes: >-
+      Memotion 1.0 (SemEval-2020 Task 8): 6,992 memes collected from public social-media / meme sites
+      in 2019-2020; photos and screenshots with impact-font captions, tweets, watermarks, re-compressed
+      many times. Parquet copy from MMSoc (2024), 0.74 GB, 5,593 train rows; sizes seen 500x896 ..
+      800x533. No license on the card; Memotion was released for research only and the memes are
+      third-party copyrighted. Human photo editing (collages, pasted text) is part of the domain;
+      predates diffusion models (~0.33 GB at the cap).
+
+  # ================================================================== art / illustration
+  met_artworks:
+    kind: custom
+    adapter: hf_parquet_select
+    role: train_real
+    repo: metmuseum/openaccess
+    args:
+      repo: metmuseum/openaccess
+      files: ["default/train/openaccess-*.parquet"]
+      image_column: image
+      where: {classification: [Paintings, Drawings, Prints]}
+      per_file: 60
+      min_side: 512
+      content_type: art
+      manifest_split: train
+    max_items: 600
+    notes: >-
+      The Met Open Access, CC0 1.0: museum photography of paintings (Asian, Islamic, European),
+      drawings and prints (Drawings and Prints shards 25-33, 42-51), full resolution. Same repo as
+      met_photographs, disjoint classifications. Dry run: 22,930 matching rows in 18 shards. Objects
+      are centuries old; only the photography is digital. ~2.5 MB per image (~1.5 GB at the cap).
+
+  bl_book_illustrations:
+    kind: custom
+    adapter: hf_parquet_select
+    role: train_real
+    repo: biglam/british-library-book-images
+    args:
+      repo: biglam/british-library-book-images
+      files: ["plates/*.parquet"]
+      image_column: image
+      per_file: 20
+      min_side: 512
+      content_type: art
+      manifest_split: train
+    max_items: 1200
+    notes: >-
+      British Library "1 Million Images from Scanned Books" (BL Labs on Flickr Commons; books c.
+      1510-1900 digitised with Microsoft), CC0 1.0 (card metadata). Config plates: 385k full-page
+      engravings, lithographs, maps; 647 shards / 425 GB, ~1 MB per image, sampled rows 1170x2060 ..
+      2265x1844 from books dated 1875-1896. A small per_file cap spreads the 1,200 images over ~60
+      shards. Scanner + JPEG only, no AI (~1.2 GB at the cap).
+
+  deart_paintings:
+    kind: hf_parquet
+    role: calib_real
+    repo: biglam/european_art
+    split: train
+    image_column: image
+    label: 0
+    content_type: art
+    manifest_split: calib
+    min_side: 512
+    max_items: 800
+    notes: >-
+      DEArt (Reshetnikov et al. 2022): 15,154 photos of European paintings of the 12th-18th c. from
+      museum / Europeana collections, CC BY-NC 2.0 (card). 37 shards / 18 GB, one painting per row,
+      sizes 633x450 .. 4944x6091. Disjoint from WikiArt by source (still a few famous works may
+      overlap). Held out as the art calibration set (~1 GB at the cap).
+
+  # ================================================================== graphics
+  statista_charts:
+    kind: hf_parquet
+    role: train_real
+    repo: heegyu/chart2text_statista
+    split: train
+    image_column: image
+    label: 0
+    content_type: graphics
+    manifest_split: train
+    min_side: 0
+    max_items: 3000
+    notes: >-
+      Chart-to-Text Statista split (Kantharaj et al., ACL 2022): bar / line / pie charts from
+      statista.com, `release date` 2014-2021 in sampled rows, one chart per row, 24,368 train rows /
+      1 GB, 800 px wide (800x543 .. 800x1376). GPL-3.0 (card). Rendered by the Statista chart engine,
+      no AI (~0.12 GB at the cap).
+
+  figureqa_plots:
+    kind: hf_parquet
+    role: calib_real
+    repo: vikhyatk/figureqa
+    split: train
+    image_column: image
+    label: 0
+    content_type: graphics
+    manifest_split: calib
+    min_side: 0
+    max_items: 2000
+    notes: >-
+      FigureQA (Kahou et al., Microsoft 2017): synthetic but non-generative plots (vertical /
+      horizontal bars, lines, dot-lines, pies) rendered with Bokeh, 100k rows (one image each, QA in
+      a list column), 2.2 GB, height 400 px, width 418-776. Card has no license (original: Microsoft
+      research data license, non-commercial). Clean anti-aliased renders: held out as the graphics
+      calibration set (~0.05 GB at the cap).
+
+  infographicvqa:
+    kind: custom
+    adapter: hf_parquet_select
+    role: train_real
+    repo: mm-eval/InfographicVQA
+    args:
+      repo: mm-eval/InfographicVQA
+      files: ["data/*.parquet"]
+      image_column: media
+      min_side: 0
+      content_type: graphics
+      manifest_split: train
+    max_items: 1000
+    notes: >-
+      InfographicVQA val + test (Mathew et al., WACV 2022): infographics collected from the web
+      before 2021, tall PNG/JPEG. 6,089 question rows / 3.6 GB in 8 shards with ~5 questions per
+      image (images in a list column `media`), so dedup leaves ~1.1k unique infographics. No license
+      on the card (original: research use, images third-party). Designer-made; pre-diffusion
+      (~0.6 GB at the cap).
+
+  slidevqa_slides:
+    kind: custom
+    adapter: hf_parquet_select
+    role: train_real
+    repo: Ahren09/SlideVQA
+    args:
+      repo: Ahren09/SlideVQA
+      files: ["data/train-*.parquet"]
+      image_column: [page_1, page_4, page_8, page_12, page_16, page_20]
+      per_file: 60
+      min_side: 512
+      content_type: graphics
+      manifest_split: train
+    max_items: 3000
+    notes: >-
+      SlideVQA (Tanaka et al., AAAI 2023) train split: SlideShare decks (~1.9k in train), 20 pages
+      per deck at 1024x768 in columns page_1..page_20; 10,617 rows (one per question, so decks
+      repeat and the sha1 dedup keeps each page once); 6 of the 20 page columns are exported. Ungated
+      mirror of the gated NTT-hil-insight/SlideVQA, no license on the card (original: research only;
+      decks copyrighted by their authors). 53 shards / 8.2 GB, ~30 KB per page (~0.1 GB at the cap).
+      Human-made slides; deck upload dates not checked.
+
+  pku_posters:
+    kind: hf_parquet
+    role: train_real
+    repo: creative-graphic-design/PKU-PosterLayout
+    split: train
+    image_column: original_poster
+    label: 0
+    content_type: graphics
+    manifest_split: train
+    min_side: 0
+    max_items: 3000
+    notes: >-
+      PKU PosterLayout (Hsu et al., CVPR 2023): 9,974 e-commerce product posters made by designers
+      (Chinese marketplaces, dataset released 2023), 513x750; CC BY-SA 4.0. Only `original_poster` is
+      used: the repo also holds `inpainted_poster` (text removed by an inpainting model) and saliency
+      maps, which must not be used as real. 15 shards / 7 GB with all columns (~0.5 GB at the cap).
+
+  # ================================================================== text-rich
+  cord_receipts:
+    kind: hf_parquet
+    role: train_real
+    repo: naver-clova-ix/cord-v2
+    split: train
+    image_column: image
+    label: 0
+    content_type: text
+    manifest_split: train
+    min_side: 0
+    max_items: 400
+    notes: >-
+      CORD v2 (Park et al., 2019): smartphone photos of Indonesian shop / restaurant receipts, CC BY
+      4.0, 800 train rows / 1.8 GB, 432x648 .. 2304x4096. No AI processing described. ~2.2 MB per
+      image (~0.9 GB at the cap).
+
+  sroie_receipts:
+    kind: hf_parquet
+    role: calib_real
+    repo: jsdnrs/ICDAR2019-SROIE
+    split: train
+    image_column: image
+    label: 0
+    content_type: text
+    manifest_split: calib
+    min_side: 0
+    max_items: 626
+    notes: >-
+      ICDAR 2019 SROIE: scans of Malaysian shop receipts (receipt dates in sampled rows: 2018), CC BY
+      4.0 (card), 626 train rows / 0.32 GB, 439x1004 .. 752x2214 in sampled rows, thermal-paper
+      fading and scanner noise. Held out as the text calibration set.
+
+  publaynet_pages:
+    kind: custom
+    adapter: hf_parquet_select
+    role: train_real
+    repo: creative-graphic-design/PubLayNet
+    args:
+      repo: creative-graphic-design/PubLayNet
+      files: ["data/train-*.parquet"]
+      image_column: image
+      per_file: 30
+      min_side: 512
+      content_type: text
+      manifest_split: train
+    max_items: 3000
+    notes: >-
+      PubLayNet (Zhong et al., IBM 2019): pages of PubMed Central OA articles rasterised from the PDFs
+      (~613x811 JPEG): text, tables, figures and equations as they appear in submitted papers.
+      CDLA-Permissive-1.0. 335,703 train rows in 199 shards / 101 GB, rows grouped by article, hence
+      the per_file cap (3,000 pages from 100 shards, ~0.9 GB). Released 2019, so no generative
+      figures. Rasterised, not scanned: no camera or scanner trace.
+
+  europeana_newspapers:
+    kind: custom
+    adapter: hf_parquet_select
+    role: train_real
+    repo: biglam/europeana_newspapers_images
+    args:
+      repo: biglam/europeana_newspapers_images
+      files: ["data/*.parquet"]
+      image_column: image
+      per_file: 10
+      min_side: 512
+      content_type: text
+      manifest_split: train
+    max_items: 400
+    notes: >-
+      Europeana Newspapers page scans, 1700s-1940s (sampled rows 1705-1938), 10 languages, from
+      eight European libraries; Public Domain Mark 1.0 (card). 98,877 pages in 253 shards / 271 GB,
+      1760x2456 .. 4236x6019 in sampled rows, up to 3.4 MB per row (image + OCR), 14 pages per row
+      group. Microfilm / paper scans with bleed-through; no AI (~1.4 GB at the cap).
+
+  # ================================================================== screenshots
+  mind2web_screenshots:
+    kind: custom
+    adapter: hf_parquet_select
+    role: train_real
+    repo: osunlp/Multimodal-Mind2Web
+    args:
+      repo: osunlp/Multimodal-Mind2Web
+      files: ["data/train-*.parquet"]
+      image_column: screenshot
+      per_file: 25
+      min_side: 512
+      content_type: screenshot
+      manifest_split: train
+    max_items: 600
+    notes: >-
+      Multimodal-Mind2Web (Deng et al., NeurIPS 2023) train: full-page desktop screenshots of real
+      websites (travel, shopping, entertainment...) recorded in 2023, 1280 px wide and very tall
+      (e.g. 1280x5429, 1280x6018); OpenRAIL (card). 7,775 action rows in 27 shards / 7.6 GB, one screenshot
+      per action (pages of one task repeat). Web content from 2023 could in rare cases contain
+      AI-generated ad or stock images (~1.2 GB at the cap).
+
+  # ================================================================== biomedical / scientific
+  pmc_microscopy_pre2022:
+    kind: custom
+    adapter: hf_parquet_select
+    role: train_real
+    repo: Alejandro98/biomedica_microscopy_imagining_subset_parquet
+    args:
+      repo: Alejandro98/biomedica_microscopy_imagining_subset_parquet
+      files: ["data/*.parquet"]
+      image_column: image
+      year_column: article_date
+      max_year: 2021
+      per_file: 100
+      min_side: 256
+      content_type: biomed
+      manifest_split: train
+    max_items: 3000
+    notes: >-
+      BIOMEDICA microscopy subset (Lozano et al. 2025, from the PubMed Central OA dump): 236,976
+      figures labelled Microscopy (light, fluorescence, confocal, electron, IHC; often multi-panel
+      with plots and scale bars), parquet copy of the gated BIOMEDICA set, 127 shards / 52 GB.
+      Filtered on article_date <= 2021 (~78% of rows). Licenses per article: CC BY-NC / NC-ND / NC-SA
+      and NIH author manuscripts ("NO-CC CODE") - research use only. Figures as served by PMC
+      (JPEG, 300-1800 px). Repo card is empty (~0.75 GB at the cap).
+
+  pmc_immunoblots_pre2022:
+    kind: custom
+    adapter: hf_parquet_select
+    role: train_real
+    repo: Alejandro98/biomedica_microscopy_imagining_subset_parquet
+    args:
+      repo: Alejandro98/biomedica_microscopy_imagining_subset_parquet
+      files: ["data/*.parquet"]
+      image_column: image
+      where: {image_secondary_label: [immunoblot]}
+      year_column: article_date
+      max_year: 2021
+      per_file: 500
+      min_side: 256
+      content_type: biomed
+      manifest_split: train
+      seed: 1
+    max_items: 1000
+    notes: >-
+      Same source as pmc_microscopy_pre2022, only figures whose BIOMEDICA secondary label contains
+      "immunoblot" (western blots / gels next to micrographs and bar plots), article year <= 2021.
+      The figure type most often checked for image manipulation in papers. Rows are sorted by label
+      combination, so blots sit in a few shards: the dry run found 855 matching rows in 2 of the
+      first 70 shards (~8 s of metadata reads per shard), so expect a scan of most of the 127
+      shards (~15 min) and possibly fewer than max_items. May share a few figures with
+      pmc_microscopy_pre2022. Research-use licenses as above (~0.3 GB at the cap).
+
+  pmc_clinical_pre2022:
+    kind: custom
+    adapter: hf_parquet_select
+    role: calib_real
+    repo: Alejandro98/biomedica_clinical_imagining_subset_parquet
+    args:
+      repo: Alejandro98/biomedica_clinical_imagining_subset_parquet
+      files: ["data/*.parquet"]
+      image_column: image
+      year_column: article_date
+      max_year: 2021
+      per_file: 100
+      min_side: 256
+      content_type: biomed
+      manifest_split: calib
+    max_items: 2000
+    notes: >-
+      BIOMEDICA clinical-imaging subset: 474,159 PMC figures (CT, MRI, ultrasound, X-ray, surgical
+      and intra-oral photos), 127 shards / 58 GB, article_date <= 2021 (~64% of rows). Licenses per
+      article: CC BY (about a third), CC BY-NC / NC-ND / NC-SA, a few CC0 / BY-SA / BY-ND. Radiology
+      overlaps ROCOv2 (also PMC), so it is held out as the biomedical calibration set (~0.25 GB).
+
+  nct_crc_he_tiles:
+    kind: custom
+    adapter: hf_parquet_select
+    role: train_real
+    repo: 1aurent/NCT-CRC-HE
+    args:
+      repo: 1aurent/NCT-CRC-HE
+      files: ["data/NCT_CRC_HE_100K_NONORM-*.parquet"]
+      image_column: image
+      per_file: 100
+      min_side: 0
+      content_type: biomed
+      manifest_split: train
+    max_items: 3000
+    notes: >-
+      NCT-CRC-HE-100K-NONORM (Kather et al., 2018, Zenodo 1214456), CC BY 4.0: 100,000 H&E colorectal
+      tissue tiles, 224x224 px at 0.5 um/px, 9 tissue classes, 31 shards / 13 GB, one class per shard
+      (checked on 5 shards), hence per_file 100 over 30 shards. The
+      NONORM variant is used because the default 100K split is Macenko colour-normalised. Whole-slide
+      scanner, no AI (~0.45 GB at the cap).
+
+  ham10000_dermoscopy:
+    kind: custom
+    adapter: hf_parquet_select
+    role: train_real
+    repo: kuchikihater/HAM10000
+    args:
+      repo: kuchikihater/HAM10000
+      files: ["data/*.parquet"]
+      image_column: image
+      per_file: 500
+      min_side: 0
+      content_type: biomed
+      manifest_split: train
+    max_items: 3000
+    notes: >-
+      HAM10000 (Tschandl et al., 2018): 10,015 dermatoscopic images of pigmented skin lesions from
+      Vienna and Queensland collected over ~20 years, 600x450; original license CC BY-NC 4.0 (card
+      has none). 6 shards / 2.8 GB sorted by diagnosis (checked: 3 of the 6 shards hold only nevi), so 500
+      per shard. Older images are digitised dermatoscopy slides; per the paper some were manually
+      cropped / colour-corrected (~0.84 GB at the cap).
+
+  kvasir_endoscopy:
+    kind: custom
+    adapter: hf_parquet_select
+    role: train_real
+    repo: SimulaMet-HOST/Kvasir-VQA
+    args:
+      repo: SimulaMet-HOST/Kvasir-VQA
+      files: ["data/*.parquet"]
+      image_column: image
+      per_file: 300
+      min_side: 0
+      content_type: biomed
+      manifest_split: train
+    max_items: 3000
+    notes: >-
+      Kvasir-VQA (2024) over HyperKvasir (2020) and Kvasir-Instrument (2021): 6,500 GI endoscopy /
+      colonoscopy frames (polyps, colitis, instruments), 720x576 / 622x528 in sampled rows, CC BY-NC
+      4.0.
+      58,849 QA rows (~9 per image) in 31 shards / 1.55 GB, deduplicated by content hash. Video
+      endoscope frames with burned-in overlays (~0.6 GB at the cap).
+
+  fundus_dr_photos:
+    kind: hf_files
+    role: train_real
+    repo: usama10/retinal-dr-longitudinal
+    allow_patterns: ["2 year follow-up fundus images/1*.jpg", "2 year follow-up fundus images/2*.jpg"]
+    label: 0
+    content_type: biomed
+    manifest_split: train
+    min_side: 0
+    max_items: 342
+    notes: >-
+      Colour fundus photographs of diabetic-retinopathy patients, Tianjin Medical University Eye
+      Hospital (IRB 2019KY-22, captured ~2019-2021), CC BY-NC 4.0. Follow-up images 3472x2320 JPEG
+      (camera resolution); the patterns take 342 of 1,178 follow-up files (0.58 GB).
+      Uploaded to the Hub in 2026; no AI processing described.
