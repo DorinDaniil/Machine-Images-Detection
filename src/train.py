@@ -28,7 +28,8 @@ def build_model(cfg: dict) -> TraceDetector:
 
 
 def build_loaders(cfg: dict, model: TraceDetector):
-    d, t = cfg["data"], cfg["training"]
+    d, t = dict(cfg["data"]), cfg["training"]
+    d["crop_size"] = d["crop_size"] // model.patch_size * model.patch_size  # grid must tile the crop exactly
     train_set = AlignedPairsDataset(d["pairs_csv"], d, split="train", seed=cfg.get("seed", 0))
 
     if d.get("val_manifest"):
@@ -73,7 +74,7 @@ def validate(model: TraceDetector, loader: DataLoader, device: torch.device, amp
             out = model(image)
         scores.append(torch.sigmoid(out["image_logit"].float()).cpu())
         labels.append(batch["label"].cpu())
-        is_fake = batch["label"] > 0
+        is_fake = batch["label"] >= 0.5  # pixel F1 at threshold 0.5 is meaningful only for alpha >= 0.5
         if "has_mask" in batch:
             is_fake &= batch["has_mask"]
         if bool(is_fake.any()):

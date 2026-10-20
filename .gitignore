@@ -195,13 +195,16 @@ cython_debug/
 
 
 checkpoint_dir/
-data/
+/data/
 logs/
 # Project data and outputs
-data/
+/data/
 checkpoints/
 logs/
 results/
 weights/
 *.pt
 !tests/**/*.pt
+
+# local notes, not for the repo
+docs/method/

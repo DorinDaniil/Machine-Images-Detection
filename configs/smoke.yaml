@@ -20,7 +20,7 @@ data:
   degrade: {jpeg_p: 0.5, jpeg_quality: [40, 95], resize_p: 0.3, resize_range: [0.6, 1.0], blur_p: 0.2, blur_sigma: [0.3, 1.0], launder_p: 0.2}
   num_workers: 0
 
-loss: {patch: 1.0, image: 1.0, dice: 0.5}
+loss: {patch: 1.0, image: 1.0, dice: 0.0}
 
 training:
   epochs: 1

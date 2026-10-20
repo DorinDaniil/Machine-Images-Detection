@@ -30,7 +30,7 @@ data:
 loss:
   patch: 1.0
   image: 1.0
-  dice: 0.5
+  dice: 0.0                   # Dice pulls probabilities to 1 inside the region, which fights the soft alpha target; enable only for binary masks
 
 training:
   epochs: 10

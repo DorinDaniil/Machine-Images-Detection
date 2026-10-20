@@ -1,0 +1,446 @@
+# Hugging Face sets with outputs of KNOWN modern generators (test-only benchmarks), merged into
+# configs/datasets.yaml by src/data/registry.py. Not duplicated from configs/data_sources_fake.yaml.
+#
+#   python -m src.data.build_manifest --datasets benchmark_ai_t2i,qwen_image_bench --out data/manifests/gen_hf.csv
+#
+# Verified on 2026-10-20 with HfApi.dataset_info / list_repo_files, the datasets-server API
+# (splits / first-rows / rows), parquet footers and model columns read through HfFileSystem, and
+# zip central directories / tar headers read with HTTP range requests. No image was downloaded,
+# so image formats and sizes below come from file listings, not from decoding.
+#
+# kind custom: generic adapters added for these sets (all download only what max_items needs)
+#   rapidata_pairs   two-image preference parquet rows, deduplicated on (prompt, model)
+#   hf_files_capped  hf_files that honours max_items (even share per folder) + generator renames
+#   hf_zip           members of zip archives by regex (range reads, archives never hit the disk)
+#   hf_tar           first members of tar / tar.gz archives (streamed, abandoned after the cap)
+#   hf_parquet_mapped hf_parquet with generator per label value
+# For custom entries `repo` at top level is informational (shown by --list); the adapter reads args.
+# generator slugs: lowercase; editors get an "-edit" suffix as in data_sources_fake.yaml.
+
+datasets:
+  # ---------------------------------------------------------------- many generators, same prompts
+  benchmark_ai_t2i:
+    kind: custom
+    adapter: rapidata_pairs
+    role: test
+    repo: Rapidata/text-to-image-human-feedback-benchmark
+    args:
+      repo: Rapidata/text-to-image-human-feedback-benchmark
+      max_shards: 64
+      content_type: other
+      manifest_split: test
+      models:
+        "GPT Image 2.0": gpt-image-2
+        "GPT Image 1.5 (high)": gpt-image-1.5
+        "GPT Image 2.5 (Flare)": gpt-image-2.5-flare
+        "GPT Image 2.5 (Sunburst)": gpt-image-2.5-sunburst
+        "HunyuanImage 3.0": hunyuan-image-3.0
+        "Stable Diffusion 3.5 Large": sd3.5-large
+        "FLUX 3 Image": flux.3
+        "Grok Imagine Image": grok-imagine
+        "Grok Imagine Image (quality)": grok-imagine-quality
+        "Grok Imagine Image 2.0": grok-imagine-2.0
+        "Grok Image Imagine 2.0 (Medium)": grok-imagine-2.0-medium
+        "Grok Image Imagine 2.0 (Thinking)": grok-imagine-2.0-thinking
+    max_items: 2000
+    notes: >-
+      Benchmark.ai leaderboard data (Rapidata), CC BY 4.0, not gated. 761k comparison rows / 64,266
+      unique images of 48 models on 1,514 prompts (616 ask for rendered text); 1,523 parquet shards,
+      369 GB. Models: GPT Image 1.5 / 2.0 / 2.5 (Flare, Sunburst), nano-banana-2 / -2.1 / -pro,
+      Imagen 3 / 4 / 4 Fast / 4 Ultra, FLUX.2 dev / flex / pro / max / klein 9B, FLUX 3, Seedream
+      4.5 / 5.0 Lite / 5.0 Pro, Qwen-Image / 2.0 Pro / 2.1 / 3.0, HunyuanImage 3.0, Grok Imagine
+      (5 variants), Ideogram 4.0 / 4.5, Recraft V4.1, Reve 2.1, Wan 2.7 Pro, HiDream O1, MAI-Image
+      2.5, ERNIE Image, Luma UNI 1.1, Muse Image, Pruna P-Image / P-Ideogram, SD 3.5 Large. Models
+      are mixed in every shard, prompts are grouped (1-2 per row group of 60-110 MB). Dry run
+      (metadata only): 2,002 images, all 48 models (27-45 each, one per prompt), reached after ~28
+      of the 64 spread shards, so ~5 GB of image columns are streamed (only the picked images are
+      written). Original bytes kept (image formats not inspected).
+
+  qwen_image_bench:
+    kind: custom
+    adapter: hf_files_capped
+    role: test
+    repo: Qwen/Qwen-Image-Bench
+    args:
+      repo: Qwen/Qwen-Image-Bench
+      allow_patterns: ["images/*"]
+      label: 1
+      generator_from: 1
+      content_type: other
+      manifest_split: test
+      generator_map:
+        nano-banana-2.0: nano-banana-2
+        hunyuanimage-3.0: hunyuan-image-3.0
+        imagen-4.0: imagen-4
+        imagen-4.0-ultra: imagen-4-ultra
+        flux.2_max: flux.2-max
+        kling_v2_1: kling-v2.1
+    max_items: 1800
+    notes: >-
+      Apache-2.0, not gated. 18 models x the same 1,000 prompts (images/<Model>/<id>_<hash>.<ext>),
+      18 GB: GPT-Image-1 / 1.5 / 2, nano-banana-2.0 / -pro, Imagen 4.0 / 4.0 Ultra, FLUX.2 pro / max,
+      Seedream 4.0 / 4.5 / 5.0, Qwen-Image / -2512 / -2.0-pro, HunyuanImage 3.0, GLM-Image, Kling v2.1.
+      The cap takes the same evenly spaced ids for every model (100 each at 1800 -> prompt-aligned
+      fakes, ~2 GB). Format is mixed inside most models (764/236 jpg/png splits), GPT/nano-banana-pro
+      all PNG: do not read format as a cue.
+
+  imagenworld_tig:
+    kind: custom
+    adapter: hf_zip
+    role: test
+    repo: TIGER-Lab/ImagenWorld-model-outputs
+    args:
+      repo: TIGER-Lab/ImagenWorld-model-outputs
+      files: [TIG.zip]
+      pattern: '^TIG/TIG_(?P<content>[A-Z]+)_\d+/model_output/(?P<generator>[^/]+)\.png$'
+      label: 1
+      contents: {A: art, CG: graphics, I: graphics, P: photo, S: screenshot, T: text}
+      generators:
+        flux1dev: flux.1-dev
+        flux1kreadev: flux.1-krea-dev
+        qwenimage: qwen-image
+        januspro: janus-pro
+        gemini: gemini-2.0-flash
+      content_type: other
+      manifest_split: test
+    max_items: 1300
+    notes: >-
+      ImagenWorld (arXiv 2603.27862), MIT, not gated. TIG.zip 9.7 GB, ~600 prompts x 13 models, all
+      PNG: sdxl, infinity, janus-pro (AR), gpt-image-1, nano-banana, gemini-2.0-flash, qwen-image,
+      flux.1-dev, flux.1-krea-dev, bagel, omnigen2, uno, sana. content_type from the topic code (A art,
+      CG/I graphics, P photo incl. some medical / minimalist design, S screenshots/receipts, T comics /
+      memes / text). janus-pro ~0.2 MB and uno ~0.34 MB per image (low resolution). Cap 1300 =
+      100 per model (~1.6 GB).
+
+  imagenworld_tie:
+    kind: custom
+    adapter: hf_zip
+    role: test
+    repo: TIGER-Lab/ImagenWorld-model-outputs
+    args:
+      repo: TIGER-Lab/ImagenWorld-model-outputs
+      files: [TIE.zip]
+      pattern: '^TIE/TIE_(?P<content>[A-Z]+)_\d+/model_output/(?P<generator>[^/]+)\.png$'
+      label: 1
+      contents: {A: art, CG: graphics, I: graphics, P: photo, S: screenshot, T: text}
+      generators:
+        gpt-image-1: gpt-image-1-edit
+        nano-banana: nano-banana-edit
+        gemini: gemini-2.0-flash-edit
+        flux1kontextdev: flux.1-kontext-dev
+        step1xedit: step1x-edit
+        bagel: bagel-edit
+        omnigen2: omnigen2-edit
+      content_type: other
+      manifest_split: test
+    max_items: 1000
+    notes: >-
+      ImagenWorld text+image editing, MIT, TIE.zip 5.4 GB, ~610 instructions x 9 editors: gpt-image-1,
+      nano-banana, gemini-2.0-flash, flux.1-kontext-dev, step1x-edit, ic-edit, instructpix2pix, bagel,
+      omnigen2. Whole-image outputs of edits, NO masks; the source images (input/1.png|jpg) are not
+      exported and are themselves of mixed origin (charts, art, photos), so no real/edited pairs.
+
+  # ---------------------------------------------------------------- human-preference arenas
+  rapidata_flux2pro_pref:
+    kind: custom
+    adapter: rapidata_pairs
+    role: test
+    repo: Rapidata/Flux-2-pro_t2i_human_preference
+    args:
+      repo: Rapidata/Flux-2-pro_t2i_human_preference
+      max_shards: 69
+      content_type: other
+      manifest_split: test
+      models:
+        4o-26-3-25: gpt-4o
+        aurora-20-1-25: grok-2-aurora
+        dalle-3: dalle-3
+        flux-1-pro: flux.1-pro
+        flux-1.1-pro: flux.1.1-pro
+        flux-2-pro-25-11-25: flux.2-pro
+        frames-23-1-25: runway-frames
+        halfmoon-4-4-25: reve-halfmoon
+        hidream-I1-full: hidream-i1-full
+        hunyuan-image-2.1: hunyuan-image-2.1
+        ideogram: ideogram-2
+        imagen-3: imagen-3
+        imagen-4-ultra-24-7-25: imagen-4-ultra
+        imagen-4.0-ultra-generate-exp-05-20: imagen-4-ultra-exp
+        janus-7b: janus-7b
+        lumina-17-2-25: lumina
+        midjourney-5.2: midjourney-v5.2
+        recraft-v3-24-7-25: recraft-v3
+        seedream-3-24-7-25: seedream-3.0
+        stable-diffusion-3: sd3
+    max_items: 2000
+    notes: >-
+      CDLA-Permissive-2.0, not gated, 69 parquet shards, 28.9 GB. FLUX.2 pro vs 19 earlier models
+      (every row has one flux-2-pro image): GPT-4o image (Mar 2025), Grok 2 Aurora, DALL-E 3, FLUX 1.0 /
+      1.1 pro, Runway Frames, Reve Halfmoon, HiDream-I1 full, HunyuanImage 2.1, Ideogram (v2 era),
+      Imagen 3, Imagen 4 Ultra (+ exp-05-20), Janus 7B (Rapidata name; presumably Janus-Pro-7B),
+      Lumina (OpenGVLab/Alpha-VLLM Lumina, Feb 2025), Midjourney 5.2, Recraft v3, Seedream 3, SD3.
+      Supersedes the separate Rapidata OpenAI-4o / xAI Aurora / HiDream / Seedream-3 / Imagen-4 /
+      HunyuanImage-2.1 sets (same counterpart models). Dry run: 1,951 images, 100 per model except
+      Reve Halfmoon (51 unique); stops after ~30 shards.
+
+  rapidata_bananamark:
+    kind: custom
+    adapter: rapidata_pairs
+    role: test
+    repo: Rapidata/bananamark-dataset
+    args:
+      repo: Rapidata/bananamark-dataset
+      max_shards: 4
+      min_new: 1
+      content_type: other
+      manifest_split: test
+      models:
+        black-forest-labs/flux-2-dev: flux.2-dev
+        black-forest-labs/flux-2-flex: flux.2-flex
+        black-forest-labs/flux-2-pro: flux.2-pro
+        bytedance/seedream-4: seedream-4
+        google/nano-banana: nano-banana
+        google/nano-banana-pro: nano-banana-pro
+        ideogram-ai/ideogram-v3-quality: ideogram-3
+        prunaai/wan-2.2-image: wan-2.2-image
+        recraft-ai/recraft-v3: recraft-v3
+        tencent/hunyuan-image-3: hunyuan-image-3.0
+    max_items: 1000
+    notes: >-
+      CDLA-Permissive-2.0, not gated, 2,161 rows / 1.9 GB (4 shards), only ~40 prompts: 400 unique
+      images in total (~40 per model), all taken. 10 models in the model columns:
+      FLUX.2 dev / flex / pro, Seedream 4, Nano Banana, Nano Banana Pro, Ideogram v3, Wan 2.2 image,
+      Recraft v3, Hunyuan Image 3 (the card also lists qwen-image, absent from the columns). ALL
+      prompts are banana-themed: strong content bias, use for per-generator recall only.
+
+  # ---------------------------------------------------------------- autoregressive generators
+  arforensics:
+    kind: custom
+    adapter: hf_zip
+    role: test
+    repo: Yanran21/ARForensics
+    args:
+      repo: Yanran21/ARForensics
+      files:
+        - ARForensics_updated_test_part001.zip
+        - ARForensics_updated_test_part002.zip
+        - ARForensics_updated_test_part003.zip
+        - ARForensics_updated_test_part004.zip
+      pattern: '^ARForensics/test/(?P<generator>[^/]+)/(?P<label>0_real|1_fake)/[^/]+$'
+      labels: {0_real: 0, 1_fake: 1}
+      content_type: photo
+      manifest_split: test
+    max_items: 2000
+    notes: >-
+      D^3QE / ARForensics (ICCV 2025, arXiv 2510.05891), MIT, not gated. Updated test set (MAR
+      replaced by Switti): 7 autoregressive models x (6,000 ImageNet test reals + 6,000 fakes), four
+      independent zips, 20.8 GB: infinity, janus-pro, llamagen, open-magvit2, rar, switti, var
+      (class-conditional ImageNet-style content). Reals are ILSVRC2012 JPEGs, fakes PNG: format
+      shortcut possible. The 42,000 reals are disjoint across subsets (checked by name). train/
+      (split .aa-.ag archive) and val/ not used.
+
+  aigi_holmes:
+    kind: custom
+    adapter: hf_zip
+    role: test
+    repo: zzy0123/AIGI-Holmes-Dataset
+    args:
+      repo: zzy0123/AIGI-Holmes-Dataset
+      files: [TestSet.zip]
+      pattern: '^TestSet/(?P<generator>[^/]+)/(?P<label>0_real|1_fake)/[^/]+$'
+      labels: {0_real: 0, 1_fake: 1}
+      generators: {FLUX: flux.1, SD35-L: sd3.5-large, PixArt-XL: pixart-alpha}
+      content_type: photo
+      manifest_split: test
+    max_items: 2000
+    notes: >-
+      AIGI-Holmes (ICCV 2025, arXiv 2507.02664) test set, CC BY-NC-SA 4.0, not gated. TestSet.zip
+      40.5 GB, 10 subsets x (5,000 real JPEG + 5,000 fakes): FLUX (variant not stated), SD3.5-Large,
+      PixArt-XL, and AR / unified models Infinity, Janus, Janus-Pro-1B, Janus-Pro-7B, LlamaGen, Show-o,
+      VAR. Fakes are PNG except Janus / Janus-Pro (small JPEG, ~19 KB): format and size shortcuts
+      differ per subset. dataset_huggingface.zip (10 GB, training) and SFTDATA.jsonl not used.
+
+  # ---------------------------------------------------------------- prompt-aligned open models
+  cospy_mscoco:
+    kind: custom
+    adapter: hf_tar
+    role: test
+    repo: ruojiruoli/Co-Spy-Bench
+    args:
+      repo: ruojiruoli/Co-Spy-Bench
+      label: 1
+      content_type: photo
+      manifest_split: test
+      files:
+        flux.1-dev: mscoco/black-forest-labs@FLUX.1-dev/images_with_metadata.tar.gz
+        flux.1-schnell: mscoco/black-forest-labs@FLUX.1-schnell/images_with_metadata.tar.gz
+        sd3-medium: mscoco/stabilityai@stable-diffusion-3-medium-diffusers/images_with_metadata.tar.gz
+        sdxl: mscoco/stabilityai@stable-diffusion-xl-base-1.0/images_with_metadata.tar.gz
+        sdxl-turbo: mscoco/stabilityai@sdxl-turbo/images_with_metadata.tar.gz
+        lcm-sdxl: mscoco/latent-consistency@lcm-lora-sdxl/images_with_metadata.tar.gz
+        playground-v2.5: mscoco/playgroundai@playground-v2.5-1024px-aesthetic/images_with_metadata.tar.gz
+        pixart-alpha: mscoco/PixArt-alpha@PixArt-XL-2-1024-MS/images_with_metadata.tar.gz
+        ssd-1b: mscoco/segmind@SSD-1B/images_with_metadata.tar.gz
+        sd-2.1: mscoco/stabilityai@stable-diffusion-2-1/images_with_metadata.tar.gz
+    max_items: 1000
+    notes: >-
+      Co-Spy-Bench (CVPR 2025, arXiv 2503.18286), MIT, not gated. 22 open T2I models x 5 caption
+      sources (MSCOCO2017, CC3M, Flickr, TextCaps, SBU), one WebDataset tar.gz per (source, model),
+      470 GB total; here the MSCOCO captions of 10 models, first 100 PNGs of each archive (FLUX.1-dev
+      ~1.2 MB each; varied seed / steps / guidance in the json). Prompt-aligned with COCO: pair with the coco_val
+      reals already in the registry (same caption distribution, no per-image id). Reals for the other
+      caption sources: ruojiruoli/Co-Spy-Misc (real_image_examples.zip, mscoco2017.zip).
+
+  # ---------------------------------------------------------------- edited images (masks / pairs)
+  sid_set_val:
+    kind: custom
+    adapter: hf_parquet_mapped
+    role: test
+    repo: saberzl/SID_Set
+    args:
+      repo: saberzl/SID_Set
+      split: validation
+      image_column: image
+      mask_column: mask
+      label_column: label
+      label_map: {"0": 0, "1": 1, "2": 1}
+      generator_by_label: {"1": flux.1, "2": ldm-inpaint}
+      content_type: photo
+      manifest_split: test
+    max_items: 2000
+    notes: >-
+      SID-Set / SIDA (CVPR 2025, arXiv 2412.04292), CC BY 4.0, not gated. validation split: 30k rows,
+      34 shards, ~17 GB, rows shuffled (checked at 8 offsets: ~1/3 real OpenImages V7, ~1/3 FLUX
+      full-synthetic from COCO / Flickr30k captions, ~1/3 tampered); streaming stops at the cap
+      (~4 shards). Tampered = object replacement / attribute edits by Latent Diffusion inpainting with
+      Language-SAM masks (mask column). The paper names only "FLUX" (variant unknown). The
+      210k train split is not used; the 60k test split is on Google Drive only.
+
+  fragfake:
+    kind: custom
+    adapter: hf_files_capped
+    role: test
+    repo: Vincent-HKUSTGZ/FragFake
+    args:
+      repo: Vincent-HKUSTGZ/FragFake
+      allow_patterns: ["Image/original/*", "Image/Flux/*", "Image/Gemini-IG/*", "Image/step1xedit/*"]
+      folder_labels: {original: 0, Flux: 1, Gemini-IG: 1, step1xedit: 1}
+      generator_from: 1
+      generator_map: {flux: flux.1-kontext-edit, gemini-ig: gemini-2.0-flash-edit, step1xedit: step1x-edit}
+      content_type: photo
+      manifest_split: test
+    max_items: 1200
+    notes: >-
+      FragFake (arXiv 2505.15644), Apache-2.0, not gated. Fine-grained object addition / replacement
+      edits of COCO photos, easy (large) and hard (small) edits; originals 3,204 JPEG, edits PNG
+      (FLUX.1 Kontext 5,130, Gemini-2.0-flash-exp image gen 4,832, Step1X-Edit 5,130). Same COCO id
+      in original and edited names (<class>_<cocoid>[_addition|_replacement]) -> real/edited pairs
+      (the cap samples the four folders independently: 300 each, pairs not guaranteed).
+      NO pixel masks (paper uses textual region descriptions). JPEG reals vs PNG edits: format
+      shortcut. GoT / MagicBrush / UltraEdit folders skipped (older editors, JPEG edits).
+
+  # ---------------------------------------------------------------- single-generator sets
+  scam_ai_gpt_image_2:
+    kind: custom
+    adapter: hf_files_capped
+    role: test
+    repo: Scam-AI/gpt-image-2
+    args:
+      repo: Scam-AI/gpt-image-2
+      allow_patterns: ["images/*.jpg"]
+      label: 1
+      generator: gpt-image-2
+      content_type: other
+      manifest_split: test
+    max_items: 2000
+    notes: >-
+      GATED (auto-approve after accepting terms on the HF page, then `hf auth login`). CC BY-NC-SA 4.0.
+      10,217 self-reported GPT-Image-2 images posted on Twitter/X in the first launch week
+      (21-28 Apr 2026), 3.4 GB JPEG as served by X (re-compressed, in-the-wild), tweet metadata in
+      metadata.jsonl. Content not inspected (gated), assumed mixed. images_overflow/ (219) skipped.
+
+  bitmind_nano_banana:
+    kind: hf_parquet
+    role: test
+    repo: bitmind/nano-banana
+    split: train
+    image_column: image
+    label: 1
+    generator: nano-banana
+    content_type: other
+    manifest_split: test
+    max_items: 1000
+    notes: >-
+      MIT, not gated. 9,457 images from Nano Banana (Gemini 2.5 Flash Image preview) by BitMind,
+      31 parquet shards / 14.9 GB; the first 8 shards (2,442 rows) are all 1024x1024 PNG (format /
+      width / height columns), ~1.6 MB each, so the cap is 1000 (~1.6 GB, ~4 shards streamed).
+      No prompts; content mixed.
+
+  photoroom_mj_v6:
+    kind: hf_parquet
+    role: test
+    repo: Photoroom/midjourney-v6-recap
+    split: train
+    image_column: image
+    label: 1
+    generator: midjourney-v6
+    content_type: other
+    manifest_split: test
+    max_items: 2000
+    notes: >-
+      MIT (card; images are Midjourney user outputs), not gated. 1.24M Midjourney v6 images
+      (from brivangl/midjourney-v6-llava), 124 parquet shards / 193 GB, 10k rows per shard. Every `id`
+      has 4 consecutive rows (the 4 images of one job, same prompt), so the first 2,000 streamed rows
+      cover 500 prompts.
+
+  midjourney_v6_1:
+    kind: custom
+    adapter: hf_files_capped
+    role: test
+    repo: saq1b/midjourney-v6.1
+    args:
+      repo: saq1b/midjourney-v6.1
+      allow_patterns: ["*.png"]
+      label: 1
+      generator: midjourney-v6.1
+      content_type: other
+      manifest_split: test
+    max_items: 2000
+    notes: >-
+      MIT on the card (images remain their creators' IP), not gated. 638 PNG from the Midjourney
+      Discord (v6.1, some niji), 1.07 GB, prompt .txt next to each image. Whole set fits the cap.
+
+  zimage_turbo:
+    kind: custom
+    adapter: hf_files_capped
+    role: test
+    repo: lrzjason/ZImageTurboGen
+    args:
+      repo: lrzjason/ZImageTurboGen
+      allow_patterns: ["*.webp"]
+      label: 1
+      generator: z-image-turbo
+      content_type: photo
+      manifest_split: test
+    max_items: 1000
+    notes: >-
+      Apache-2.0, not gated. 3,000 Tongyi-MAI/Z-Image-Turbo images, 1024x1024, 8 steps, seeds 0-2999,
+      single prompt "a photo"; saved as LOSSY WebP (0.43 GB): compression differs from raw output.
+
+  klingai_images:
+    kind: custom
+    adapter: hf_files_capped
+    role: test
+    repo: bitmind/klingai-images
+    args:
+      repo: bitmind/klingai-images
+      allow_patterns: ["*.png", "*.jpg"]
+      label: 1
+      generator: kling-image
+      content_type: other
+      manifest_split: test
+    max_items: 1000
+    notes: >-
+      Apache-2.0 (source nyuuzyou/klingai, CC0), not gated. 3,791 images (3,703 PNG + 88 JPG, 6.6 GB)
+      from the public KlingAI gallery (2024, Kling/Kolors image models, exact version unknown);
+      metadata in image_metadata.parquet. ~1.7 MB per image, cap 1000 (~1.7 GB).
