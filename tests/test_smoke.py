@@ -1,146 +1,53 @@
-"""End-to-end smoke test on CPU with a randomly initialised tiny backbone.
-
-Builds fake "aligned pairs" from synthetic images (no VAE, no download), then runs
-dataset -> model -> loss -> one training epoch -> scoring -> summary -> calibration.
-
-    python -m pytest tests -q
-"""
-
-import json
-from pathlib import Path
+"""CPU check of the whole chain on synthetic images, no downloads. python -m pytest tests -q"""
 
 import numpy as np
-import pandas as pd
-import torch
 from PIL import Image
 
-from src.data import AlignedPairsDataset, compose, random_region_mask, read_manifest, write_manifest
-from src.data.dataset import PAIR_COLUMNS
-from src.evaluate import calibrate, precision_at_recall, score_manifest, summarize
+from src.data import ImageDataset, PairDataset, blend, random_mask
+from src.evaluate import report, score
 from src.losses import trace_loss
-from src.model import TraceDetector, load_model
-from src.train import build_loaders, load_config, train_model
-
-CONFIG = Path(__file__).resolve().parents[1] / "configs" / "smoke.yaml"
+from src.model import TraceDetector
+from src.train import train
 
 
-def smooth_image(rng: np.random.Generator, size: int = 256) -> np.ndarray:
-    """Low-frequency colour noise that looks vaguely like a photo."""
-    coarse = rng.uniform(0, 255, size=(8, 8, 3)).astype(np.float32)
-    return np.asarray(Image.fromarray(coarse.astype(np.uint8)).resize((size, size), Image.BICUBIC))
-
-
-def fake_redecode(real: np.ndarray, rng: np.random.Generator) -> np.ndarray:
-    """Stand-in for a VAE round trip: slight blur plus a faint periodic grid."""
-    blurred = np.asarray(Image.fromarray(real).resize((real.shape[1] // 2, real.shape[0] // 2)).resize(real.shape[1::-1]))
-    grid = (np.indices(real.shape[:2]).sum(0) % 8 == 0)[..., None] * 6.0
-    return np.clip(blurred.astype(np.float32) + grid + rng.normal(0, 2, real.shape), 0, 255).astype(np.uint8)
-
-
-def make_pairs(root: Path, n: int = 8) -> Path:
+def make_pairs(root, n=6, size=200):
     rng = np.random.default_rng(0)
-    rows = []
+    pairs = []
     for i in range(n):
-        pair_dir = root / "synthetic" / f"{i:04d}"
-        pair_dir.mkdir(parents=True)
-        real = smooth_image(rng)
-        Image.fromarray(real).save(pair_dir / "real.png")
-        Image.fromarray(fake_redecode(real, rng)).save(pair_dir / "sd15.png")
-        rows.append({"pair_dir": str(pair_dir.relative_to(root)), "decoders": "sd15", "content_type": "photo",
-                     "source": "synthetic", "split": "train" if i < n - 2 else "val"})
-    csv = root / "aligned_pairs.csv"
-    pd.DataFrame(rows, columns=PAIR_COLUMNS).to_csv(csv, index=False)
-    return csv
+        real = np.asarray(Image.fromarray(rng.integers(0, 255, (8, 8, 3), dtype=np.uint8)).resize((size, size), Image.BICUBIC))
+        fake = np.clip(real.astype(float) + rng.normal(0, 4, real.shape), 0, 255).astype(np.uint8)  # stand-in for a VAE
+        pair = root / f"{i:03d}"
+        pair.mkdir()
+        Image.fromarray(real).save(pair / "real.png")
+        Image.fromarray(fake).save(pair / "sd15.png")
+        pairs.append(pair)
+    return pairs
 
 
-def make_test_manifest(root: Path, n: int = 6) -> Path:
-    root.mkdir(parents=True, exist_ok=True)
-    rng = np.random.default_rng(1)
-    rows = []
-    for i in range(n):
-        real = smooth_image(rng)
-        label = i % 2
-        path, mask_path = root / f"img_{i}.png", ""
-        if label:
-            mask = random_region_mask(256, 256, rng)
-            image, _ = compose(real, fake_redecode(real, rng), mask, 1.0)
-            mask_path = root / f"mask_{i}.png"
-            Image.fromarray((mask * 255).astype(np.uint8)).save(mask_path)
-        else:
-            image = real
-        Image.fromarray(image).save(path)
-        rows.append({"path": str(path), "label": label, "mask_path": str(mask_path), "generator": "sd15" if label else "",
-                     "content_type": "photo", "source": "synthetic", "split": "test"})
-    manifest = root / "test.csv"
-    write_manifest(pd.DataFrame(rows), manifest)
-    return manifest
+def test_pipeline(tmp_path):
+    pairs = make_pairs(tmp_path)
+    model = TraceDetector("tiny", head_dim=16, topk=0.1)
+    data = PairDataset(pairs, ["sd15"], crop=168)
+    item = data[0]
+    assert item["image"].shape == (3, 168, 168) and item["target"].shape == (1, 168, 168)
 
+    patch_logits, image_logit = model(item["image"][None])
+    assert patch_logits.shape == (1, 1, 12, 12) and image_logit.shape == (1,)
+    trace_loss(patch_logits, image_logit, item["target"][None]).backward()
 
-def test_dataset_and_loss(tmp_path):
-    cfg = load_config(CONFIG)
-    pairs = make_pairs(tmp_path / "aligned")
-    dataset = AlignedPairsDataset(pairs, cfg["data"], split="train")
-    item = dataset[0]
-    assert item["image"].shape == (3, 224, 224) and item["target"].shape == (1, 224, 224)
-    assert 0.0 <= float(item["label"]) <= 1.0
+    cfg = dict(device="cpu", out=str(tmp_path / "run"), batch_size=2, num_workers=0, lr=1e-3, weight_decay=0.0, epochs=1)
+    best = train(model, PairDataset(pairs[2:], ["sd15"], 168), PairDataset(pairs[:2], ["sd15"], 168, seed=1), cfg)
+    model = TraceDetector.load(best)
 
-    model = TraceDetector.from_config(cfg["model"])
-    out = model(item["image"][None])
-    assert out["patch_logits"].shape == (1, 1, 16, 16) and out["image_logit"].shape == (1,)
-    losses = trace_loss(out["patch_logits"], out["image_logit"], item["target"][None], cfg["loss"])
-    losses["total"].backward()
-    assert torch.isfinite(losses["total"])
+    real = np.asarray(Image.open(pairs[0] / "real.png"), dtype=np.float32)
+    fake = np.asarray(Image.open(pairs[0] / "sd15.png"), dtype=np.float32)
+    mask = random_mask(*real.shape[:2], np.random.default_rng(1))
+    Image.fromarray(blend(real, fake, mask)).save(tmp_path / "local.png")
+    Image.fromarray((mask * 255).astype(np.uint8)).save(tmp_path / "local_mask.png")
 
-
-def test_train_score_calibrate(tmp_path):
-    cfg = load_config(CONFIG)
-    cfg["data"]["pairs_csv"] = str(make_pairs(tmp_path / "aligned"))
-    cfg["training"]["checkpoint_dir"] = str(tmp_path / "ckpt")
-    cfg["training"]["log_dir"] = str(tmp_path / "logs")
-
-    model = TraceDetector.from_config(cfg["model"])
-    train_loader, val_loader = build_loaders(cfg, model)
-    best = train_model(model, train_loader, val_loader, cfg)
-    assert best.exists()
-
-    device = torch.device("cpu")
-    model = load_model(best, device)
-    df = read_manifest(make_test_manifest(tmp_path / "test"))
-    scored = score_manifest(model, df, device, max_side=256, num_workers=0, amp=False)
-    assert scored["score"].between(0, 1).all()
-    assert scored.loc[scored["label"] == 1, "pixel_f1"].notna().all()
-
-    summary = summarize(scored)
-    assert summary.iloc[0]["group"] == "ALL" and "auroc" in summary.columns
-
-    thresholds = calibrate(scored[scored["label"] == 0], alpha=0.5, min_per_type=1)
-    assert 0.0 <= thresholds["global"] <= 1.0
-    json.dumps(thresholds)
-
-
-def test_precision_at_recall():
-    labels = np.array([1, 0, 1, 0, 0])
-    scores = np.array([0.9, 0.8, 0.7, 0.2, 0.1])
-    assert precision_at_recall(labels, scores, 0.5) == 1.0
-    assert abs(precision_at_recall(labels, scores, 1.0) - 2 / 3) < 1e-9
-
-
-def test_registry_builds_every_source():
-    from src.data.registry import build_source, load_registry
-
-    reg = load_registry(Path(__file__).resolve().parents[1] / "configs" / "datasets.yaml")
-    assert reg["datasets"]
-    for name, entry in reg["datasets"].items():
-        source, _ = build_source(name, {k: v for k, v in entry.items() if k != "role"})
-        assert source.name == name
-
-
-def test_generic_hf_parquet_rows(tmp_path):
-    from src.data.sources.generic import HFParquetSource
-
-    src = HFParquetSource(name="demo", repo="x/y", content_type="photo", label=1, generator="flux.2", manifest_split="test")
-    folder = tmp_path / "demo"
-    folder.mkdir()
-    (folder / "index.csv").write_text("file,mask,label,generator\n00000001.jpg,,1,flux.2\n00000002.png,00000002_mask.png,1,flux.2\n")
-    rows = src.rows(tmp_path)
-    assert len(rows) == 2 and rows[1]["mask_path"].endswith("00000002_mask.png") and rows[0]["generator"] == "flux.2"
+    reals = ImageDataset([{"path": p / "real.png", "label": 0} for p in pairs], model.patch_size)
+    fakes = ImageDataset([{"path": tmp_path / "local.png", "label": 1, "mask": tmp_path / "local_mask.png"}], model.patch_size)
+    real_scores, _ = score(model, reals, "cpu")
+    fake_scores, f1 = score(model, fakes, "cpu")
+    assert np.isfinite(f1).all()
+    assert "| local |" in report(real_scores, {"local": (fake_scores, f1)})

@@ -1,45 +1,30 @@
-seed: 0
-
-model:
-  backbone: facebook/dinov3-vitb16-pretrain-lvd1689m   # gated: accept the license on HF and run `hf auth login`
-  # backbone: facebook/dinov2-with-registers-base      # open fallback (Apache-2.0), patch 14
-  train_last_blocks: 0        # 0 = backbone fully frozen; 2-4 unfreezes the last blocks
-  head_dim: 256
-  topk_ratio: 0.05            # image score = mean of the top 5 % patch logits
+# Pilot: train on COCO photos re-decoded by one VAE,
+# test on VAEs never seen in training and on images of real generators.
 
 data:
-  pairs_csv: data/aligned/aligned_pairs.csv   # from src/data/prepare_pairs.py
-  val_manifest: null          # optional manifest with split=val (real + fakes with masks)
-  data_root: data
-  crop_size: 512              # native-resolution crops, no resizing
-  p_real: 0.3                 # sample mix: untouched real / fully re-decoded / local paste
+  dir: data
+  n_real: 2000              # COCO val2017 photos: 80 % train, 20 % test
+  max_side: 1024
+  train_vae: [sd15]         # Stable Diffusion 1.x VAE makes the training fakes
+  test_vae: [sdxl, flux]    # unseen VAEs for the test
+  generators: [gpt-image-2, nano-banana-pro, nano-banana-2.0, FLUX.2-pro, Seedream-4.5,
+               Imagen-4.0, Qwen-Image, HunyuanImage-3.0, kling_v2_1]
+  n_per_generator: 200      # images per model from Qwen/Qwen-Image-Bench
+
+model:
+  backbone: facebook/dinov3-vitb16-pretrain-lvd1689m   # gated; open: facebook/dinov2-with-registers-base
+  head_dim: 256
+  topk: 0.05                # image score = mean of the top 5 % patch logits
+
+train:
+  crop: 384
+  p_real: 0.3
   p_full: 0.3
   p_local: 0.4
-  alpha_range: [0.3, 1.0]     # mixing ratio = soft target
-  area_range: [0.05, 0.6]     # fraction of the image covered by a local paste
-  degrade:
-    jpeg_p: 0.7
-    jpeg_quality: [40, 95]
-    resize_p: 0.5
-    resize_range: [0.5, 1.0]
-    blur_p: 0.2
-    blur_sigma: [0.3, 1.5]
-    launder_p: 0.3            # down-scale + JPEG + up-scale + JPEG, like a social network
-  num_workers: 8
-
-loss:
-  patch: 1.0
-  image: 1.0
-  dice: 0.0                   # Dice pulls probabilities to 1 inside the region, which fights the soft alpha target; enable only for binary masks
-
-training:
   epochs: 10
-  batch_size: 16
+  batch_size: 32
   lr: 3.0e-4
   weight_decay: 0.05
-  warmup_steps: 500
-  amp: true
+  num_workers: 8
   device: cuda
-  log_every: 50
-  checkpoint_dir: checkpoints/dinov3_b16
-  log_dir: logs/dinov3_b16
+  out: runs/pilot
