@@ -4,6 +4,7 @@ import io
 
 import numpy as np
 import pytest
+import torch
 from PIL import Image
 
 from src.data import ImageDataset, TrainDataset, load_rows, render_folder, save_rows
@@ -11,7 +12,7 @@ from src.data.download import _store
 from src.evaluate import report, score, threshold_at
 from src.losses import patch_loss
 from src.model import Detector
-from src.train import balanced_weights, train
+from src.train import BinaryMetrics, balanced_weights, train
 
 
 def make_rows(root, n=8, size=200):
@@ -47,8 +48,13 @@ def test_pipeline(tmp_path):
     assert patch_logits.shape == (1, 1, 10, 10) and image_logit.shape == (1,)
     patch_loss(patch_logits, image_logit, item["target"][None]).backward()
 
+    m = BinaryMetrics(0.5)
+    m.update(torch.tensor([2.0, -2.0, 2.0, -2.0]), torch.tensor([1.0, 0.0, 0.0, 1.0]))
+    assert m.summary() == {"acc": 0.5, "prec": 0.5, "rec": 0.5, "f1": 0.5, "fpr": 0.5}
+
     cfg = dict(device="cpu", out=str(tmp_path / "run"), batch_size=2, num_workers=0, lr=1e-3, weight_decay=0.0, epochs=1)
     best = train(model, TrainDataset(rows[2:], 160), TrainDataset(rows[:4], 160, seed=1), cfg)
+    assert "val_f1" in (tmp_path / "run" / "metrics.csv").read_text()
     model = Detector.load(best)
 
     for protocol in ("native", "equalized"):

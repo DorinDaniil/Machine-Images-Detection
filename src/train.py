@@ -1,27 +1,54 @@
+import csv
 import math
 from collections import Counter
 from pathlib import Path
 
-import numpy as np
 import torch
-from sklearn.metrics import roc_auc_score
 from torch.utils.data import DataLoader, WeightedRandomSampler
 
 from .losses import patch_loss
 from .model import Detector
 
 
+class BinaryMetrics:
+    """Epoch-level accuracy, precision, recall, F1 and FPR: TP / FP / FN / TN are accumulated over all
+    images of the epoch at a fixed probability threshold, so batches of different size weigh correctly."""
+
+    def __init__(self, threshold: float = 0.5):
+        self.threshold = threshold
+        self.tp = self.fp = self.fn = self.tn = 0
+
+    def update(self, logits: torch.Tensor, labels: torch.Tensor) -> None:
+        pred = torch.sigmoid(logits.detach().float()).cpu() >= self.threshold
+        true = labels.detach().cpu() > 0.5
+        self.tp += int((pred & true).sum())
+        self.fp += int((pred & ~true).sum())
+        self.fn += int((~pred & true).sum())
+        self.tn += int((~pred & ~true).sum())
+
+    @staticmethod
+    def _ratio(a: int, b: int) -> float:
+        return a / b if b > 0 else 0.0
+
+    def summary(self) -> dict:
+        p, r = self._ratio(self.tp, self.tp + self.fp), self._ratio(self.tp, self.tp + self.fn)
+        return {"acc": self._ratio(self.tp + self.tn, self.tp + self.fp + self.fn + self.tn), "prec": p, "rec": r,
+                "f1": self._ratio(2 * p * r, p + r), "fpr": self._ratio(self.fp, self.fp + self.tn)}
+
+
 @torch.no_grad()
-def val_auroc(model: Detector, loader: DataLoader, device: str) -> float:
+def validate(model: Detector, loader: DataLoader, device: str, threshold: float) -> dict:
+    """Loss averaged over images and the binary metrics of the whole validation set."""
     model.eval()
-    labels, scores = [], []
+    metrics, loss_sum, n = BinaryMetrics(threshold), 0.0, 0
     for batch in loader:
+        image, target = batch["image"].to(device), batch["target"].to(device)
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device == "cuda"):
-            _, image_logit = model(batch["image"].to(device))
-        scores.append(image_logit.float().cpu())
-        labels.append(batch["label"] > 0)
-    labels, scores = torch.cat(labels).numpy(), torch.cat(scores).numpy()
-    return roc_auc_score(labels, scores) if 0 < labels.sum() < len(labels) else float("nan")
+            patch_logits, image_logit = model(image)
+        loss_sum += patch_loss(patch_logits.float(), image_logit.float(), target).item() * len(image)
+        n += len(image)
+        metrics.update(image_logit, batch["label"])
+    return {"loss": loss_sum / max(n, 1), **metrics.summary()}
 
 
 def balanced_weights(rows: list[dict]) -> list[float]:
@@ -31,9 +58,15 @@ def balanced_weights(rows: list[dict]) -> list[float]:
     return [0.5 / counts[""] if not r["generator"] else 0.5 / (n_gen * counts[r["generator"]]) for r in rows]
 
 
+def fmt(stats: dict) -> str:
+    return " ".join(f"{k} {v:.4f}" for k, v in stats.items())
+
+
 def train(model: Detector, train_set, val_set, cfg: dict) -> Path:
-    """cfg = the `train` block of configs/train.yaml. Returns the path of the best checkpoint."""
+    """cfg = the `train` block of configs/train.yaml. Metrics of every epoch go to <out>/metrics.csv;
+    the checkpoint with the best validation F1 is kept as best.pt. Returns its path."""
     device = cfg["device"] if torch.cuda.is_available() else "cpu"
+    threshold = cfg.get("threshold", 0.5)
     out = Path(cfg["out"])
     out.mkdir(parents=True, exist_ok=True)
     sampler = WeightedRandomSampler(balanced_weights(train_set.rows), num_samples=len(train_set), replacement=True)
@@ -48,11 +81,11 @@ def train(model: Detector, train_set, val_set, cfg: dict) -> Path:
     schedule = lambda step: min(1.0, (step + 1) / warmup) * 0.5 * (1 + math.cos(math.pi * step / total))  # noqa: E731
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, schedule)
 
-    best = -1.0
-    for epoch in range(cfg["epochs"]):
+    best, log = -1.0, []
+    for epoch in range(1, cfg["epochs"] + 1):
         model.train()
         train_set.epoch = epoch
-        losses = []
+        metrics, loss_sum, n = BinaryMetrics(threshold), 0.0, 0
         for step, batch in enumerate(loader):
             image, target = batch["image"].to(device), batch["target"].to(device)
             with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device == "cuda"):
@@ -62,15 +95,23 @@ def train(model: Detector, train_set, val_set, cfg: dict) -> Path:
             loss.backward()
             optimizer.step()
             scheduler.step()
-            losses.append(loss.item())
+            loss_sum += loss.item() * len(image)
+            n += len(image)
+            metrics.update(image_logit, batch["label"])
             if step % 50 == 0:
-                print(f"epoch {epoch + 1} step {step}/{len(loader)} loss {np.mean(losses[-50:]):.4f}")
+                print(f"epoch {epoch} step {step}/{len(loader)} loss {loss.item():.4f}")
 
-        auc = val_auroc(model, val_loader, device)
-        print(f"epoch {epoch + 1}: train loss {np.mean(losses):.4f}, val AUROC {auc:.4f}")
+        train_stats = {"loss": loss_sum / max(n, 1), **metrics.summary()}
+        val_stats = validate(model, val_loader, device, threshold)
+        print(f"epoch {epoch}: train {fmt(train_stats)}\n{' ' * (len(str(epoch)) + 7)} val   {fmt(val_stats)}")
+        log.append({"epoch": epoch, **{f"train_{k}": v for k, v in train_stats.items()}, **{f"val_{k}": v for k, v in val_stats.items()}})
+        with open(out / "metrics.csv", "w", newline="") as f:
+            writer = csv.DictWriter(f, log[0].keys())
+            writer.writeheader()
+            writer.writerows(log)
+
         model.save(out / "last.pt")
-        auc = -1.0 if math.isnan(auc) else auc  # NaN when the validation set has one class only
-        if auc >= best:
-            best = auc
+        if val_stats["f1"] >= best:
+            best = val_stats["f1"]
             model.save(out / "best.pt")
     return out / "best.pt"

@@ -29,6 +29,8 @@ python scripts/run_test.py --config configs/train.yaml
 
 - train: OpenFake core/train, 100k reals (LAION, Pexels) and up to 5000 images of each of 21 popular
   and recent generators; 15 % of the reals are kept apart for calibration;
+- training log: accuracy, precision, recall, F1 and FPR of every epoch (train and validation) in
+  `runs/pilot/metrics.csv`; `best.pt` is the epoch with the best validation F1;
 - threshold: 1 % false positives on the calibration reals and on rendered text, UI, charts, logos;
 - test, against reals of the same source:
   - OpenFake core/test: newer generators (GPT-Image-1.5 and 2, Nano Banana Pro, Seedream 5,
