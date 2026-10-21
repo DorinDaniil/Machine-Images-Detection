@@ -23,6 +23,7 @@ For long streams log in once (`hf auth login`, a read token): anonymous download
 ## Pilot
 
 ```bash
+python scripts/download_data.py --config configs/train.yaml   # once; stop and rerun any time
 python scripts/run_train.py --config configs/train.yaml
 python scripts/run_test.py --config configs/train.yaml
 ```
@@ -40,12 +41,13 @@ python scripts/run_test.py --config configs/train.yaml
 - protocols: `equalized` (every image resized, cropped and JPEG-compressed the same way) and `native`;
 - result: `runs/pilot/report.md`.
 
-Data: 8 threads stream 3.3 TB of train and 68 GB of test. Nothing but the kept images is written:
-~0.2 MB each, ~75 GB in all. A stopped or crashed download resumes: run the same command again, finished files are skipped.
-Training: one GPU, a few hours. Generators are very unequal in size;
-to stream less, set `max_rows` (estimate for 72 generators from the first file):
+Data: `download_data.py` fetches the 608 train files (3.3 TB) and 13 test files whole, 8 at a time,
+keeps the images the quotas allow and deletes each file: ~45 GB of temporary disk, ~0.2 MB per kept
+image. A broken file is retried; a stopped run resumes from the finished files. Training: one GPU,
+a few hours. Generators are very unequal in size; to download less, set `max_rows` (estimate for
+72 generators from the first file):
 
-| max_rows | streamed | generators with 5000 | with ≥ 1000 | disk |
+| max_rows | downloaded | generators with 5000 | with ≥ 1000 | disk |
 |---|---|---|---|---|
 | 400k | 0.6 TB | 13 | 33 | ~50 GB |
 | 800k | 1.1 TB | 21 | 47 | ~57 GB |
@@ -60,7 +62,7 @@ src/losses.py     patch and image BCE
 src/train.py      training loop, generator-balanced sampling
 src/evaluate.py   scores, threshold from calibration reals, report table
 src/data/         download.py (OpenFake, SID_Set), render.py (non-photo reals), dataset.py
-scripts/          run_train.py, run_test.py
+scripts/          download_data.py, run_train.py, run_test.py
 configs/          train.yaml
 notebooks/        quickstart.ipynb
 ```

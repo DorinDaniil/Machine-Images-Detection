@@ -70,19 +70,28 @@ def test_store_and_renders(tmp_path):
     assert len(items) == 4 and all(min(Image.open(it["path"]).size) >= 512 for it in items)
 
 
-class FakeStream(list):
-    """Stands in for a streamed Hub split of 3 files: file k is the k-th contiguous third.
-    File `fail` loses its connection halfway; `opened` lists the files that were read."""
-    n_shards = 3
+class FakeHub:
+    """Stands in for the Hub: a split of 3 parquet files, file k holds the k-th third of the rows, grouped by
+    kind as in OpenFake test files. `fail[name]` = how many more times that file breaks halfway."""
 
-    def __init__(self, rows, fail=None):
-        super().__init__(rows)
-        self.fail, self.opened = fail, []
+    def __init__(self):
+        buf = io.BytesIO()
+        Image.new("RGB", (600, 600), "white").save(buf, format="PNG")
+        kinds = [("real", "docci"), ("real", "imagenet"), ("fake", "gen-a"), ("fake", "gen-b"), ("fake", "tiny-random-sana")]
+        self.rows = [{"image": {"bytes": buf.getvalue()}, "label": label, "model": model} for label, model in kinds for _ in range(9)]
+        self.fail, self.opened = {}, []
 
-    def shard(self, n, k):
-        self.opened.append(k)
-        part = self[k * len(self) // n:(k + 1) * len(self) // n]
-        return broken(part) if k == self.fail else part
+    def files(self, split):
+        return ["f0", "f1", "f2"]
+
+    def read(self, name, tmp_dir):
+        self.opened.append(name)
+        k = int(name[1])
+        part = self.rows[k * len(self.rows) // 3:(k + 1) * len(self.rows) // 3]
+        if self.fail.get(name, 0) > 0:
+            self.fail[name] -= 1
+            return broken(part)
+        return iter(part)
 
 
 def broken(rows):
@@ -90,28 +99,30 @@ def broken(rows):
     raise ConnectionError("connection lost")
 
 
-def fake_openfake_rows():
-    """9 rows of each kind, grouped by kind as in OpenFake test files."""
-    buf = io.BytesIO()
-    Image.new("RGB", (600, 600), "white").save(buf, format="PNG")
-    kinds = [("real", "docci"), ("real", "imagenet"), ("fake", "gen-a"), ("fake", "gen-b"), ("fake", "tiny-random-sana")]
-    return [{"image": {"bytes": buf.getvalue()}, "label": label, "model": model} for label, model in kinds for _ in range(9)]
+def fake_hub(monkeypatch):
+    from src.data import download
+
+    hub = FakeHub()
+    monkeypatch.setattr(download, "_files", hub.files)
+    monkeypatch.setattr(download, "_rows", hub.read)
+    monkeypatch.setattr(download, "ATTEMPTS", 3)
+    monkeypatch.setattr(download, "RETRY_WAIT", 0)
+    return download, hub
 
 
 def test_openfake_resume(tmp_path, monkeypatch):
-    """A crash in one file keeps the finished files; the rerun reads only the broken file and respects the quotas."""
-    from src.data import download
-
-    stream = FakeStream(fake_openfake_rows(), fail=2)
-    monkeypatch.setattr(download, "_stream", lambda *a, **k: stream)
+    """A file that keeps breaking stops the run but the finished files stay; the rerun reads only that file,
+    a single break is retried, and the quotas hold."""
+    download, hub = fake_hub(monkeypatch)
+    hub.fail = {"f2": 99}
     with pytest.raises(ConnectionError):
         download.openfake("test", tmp_path / "of", n_real=2, n_per_model=2, workers=3)
     assert sorted(p.name for p in (tmp_path / "of" / "done").glob("*.json")) == ["0000.json", "0001.json"]
     assert not (tmp_path / "of.csv").exists()
 
-    stream.fail, stream.opened = None, []
+    hub.fail, hub.opened = {"f2": 1}, []
     rows = download.openfake("test", tmp_path / "of", n_real=2, n_per_model=2, workers=3)
-    assert stream.opened == [2]
+    assert hub.opened == ["f2", "f2"]
     assert sum(r["label"] == 0 for r in rows) == 2
     assert sorted(r["generator"] for r in rows if r["label"]) == ["gen-a", "gen-a", "gen-b", "gen-b"]
 
@@ -119,10 +130,7 @@ def test_openfake_resume(tmp_path, monkeypatch):
 def test_openfake_caps(tmp_path, monkeypatch):
     """Quotas shared by threads even when files are grouped by generator, real-source filter, skipped noise model,
     caching; no Hub."""
-    from src.data import download
-
-    stream = FakeStream(fake_openfake_rows())
-    monkeypatch.setattr(download, "_stream", lambda *a, **k: stream)
+    download, _ = fake_hub(monkeypatch)
 
     for workers, max_rows, out in ((1, None, "one"), (3, 100, "three")):
         rows = download.openfake("test", tmp_path / out, n_real=2, n_per_model=2, max_rows=max_rows, real_sources=["docci"], workers=workers)

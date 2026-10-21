@@ -3,7 +3,7 @@
 
 data:
   dir: data
-  workers: 8                # threads streaming separate files of a split
+  workers: 8                # OpenFake files downloaded at once, ~5.4 GB of temporary disk each
   train:                    # OpenFake core/train: 2.3M rows, 3.3 TB, generators mixed in every file
     max_rows: null          # whole split: 3.3 TB streamed, only kept images written (~75 GB with test)
     n_real: 60000           # LAION and Pexels photos; 15 % of them are kept apart for calibration
