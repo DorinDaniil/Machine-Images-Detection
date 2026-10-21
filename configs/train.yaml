@@ -4,9 +4,9 @@
 data:
   dir: data
   workers: 8                # OpenFake files downloaded at once, ~5.4 GB of temporary disk each
-  train:                    # OpenFake core/train: 608 files, 3.3 TB downloaded, ~0.2 MB per kept image
-    n_real: 60000           # LAION and Pexels photos; 15 % of them are kept apart for calibration
-    n_per_model: 5000       # cap per generator; smaller generators give all they have
+  train:                    # OpenFake core/train: 608 files, 3.3 TB downloaded; images kept as original bytes
+    n_real: null            # LAION and Pexels photos; null: all (~590k usable); 15 % are kept apart for calibration
+    n_per_model: null       # cap per generator; null: all (SD 3.5 ~150k, rare fine-tunes a few hundred)
     max_files: null         # null: all 608; a few for a quick run
   test:                     # OpenFake core/test: 13 files, 68 GB; newer generators, DOCCI reals
     n_real: 5000
@@ -24,7 +24,7 @@ model:
 
 train:
   crop: 448
-  epochs: 5
+  epochs: 3                 # ~1.7M images per epoch with the whole of OpenFake
   batch_size: 32
   lr: 3.0e-4
   weight_decay: 0.05

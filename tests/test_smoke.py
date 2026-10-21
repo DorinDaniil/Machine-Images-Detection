@@ -63,8 +63,10 @@ def test_pipeline(tmp_path):
 def test_store_and_renders(tmp_path):
     buf = io.BytesIO()
     Image.new("RGB", (2000, 1500), "gray").save(buf, format="PNG")
-    assert _store(buf.getvalue(), tmp_path / "big.jpg", 1024, 512) == (1024, 768)  # shrunk and re-saved as JPEG
-    assert _store(buf.getvalue(), tmp_path / "small.jpg", 1024, 1600) is None       # too small: skipped
+    path, size = _store(buf.getvalue(), tmp_path / "big", 512)
+    assert path.suffix == ".png" and size == (2000, 1500) and path.read_bytes() == buf.getvalue()  # untouched
+    assert _store(buf.getvalue(), tmp_path / "small", 1600) is None  # too small: skipped
+    assert _store(b"not an image", tmp_path / "bad", 512) is None    # broken: skipped
     assert threshold_at(np.linspace(0, 1, 101), 0.05) >= 0.94
     items = render_folder(tmp_path / "renders", 4, "test")
     assert len(items) == 4 and all(min(Image.open(it["path"]).size) >= 512 for it in items)
@@ -139,3 +141,4 @@ def test_openfake_caps(tmp_path, monkeypatch):
         assert sorted(r["generator"] for r in rows if r["label"]) == ["gen-a", "gen-a", "gen-b", "gen-b"]
     assert download.openfake("test", tmp_path / "three", 2, 2) == load_rows(tmp_path / "three.csv")  # cached
     assert not [r for r in download.openfake("test", tmp_path / "first", 9, 9, max_files=1) if r["label"]]  # file 0: reals only
+    assert len(download.openfake("test", tmp_path / "all", real_sources=["docci"])) == 27  # no limits: 9 docci, 9 gen-a, 9 gen-b

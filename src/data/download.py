@@ -1,5 +1,5 @@
 """Open datasets from Hugging Face. Parquet files are downloaded whole (hf_xet: many connections, partial
-downloads resume), the kept images are written as JPEG and the file is deleted.
+downloads resume), the kept images are written to disk and the file is deleted.
 
 OpenFake (ComplexDataLab/OpenFake, v2, CC BY-NC 4.0): real photos and images of ~70 generators, with the
     generator name for every image. core/train: 2.3M rows, 3.3 TB, 608 files, generators mixed in every file.
@@ -8,9 +8,10 @@ OpenFake (ComplexDataLab/OpenFake, v2, CC BY-NC 4.0): real photos and images of 
 SID_Set (saberzl/SID_Set, CC BY 4.0): real (0), fully synthetic (1) and locally edited (2) images with masks
     of the edited region; validation: 30k rows, 17 GB, 34 files.
 
-Every image is stored the same way, whatever its label: long side at most 1024, JPEG q95. Images whose
-short side is below `min_side` are skipped, also whatever the label. So file format and size carry no
-information about the label.
+Images are stored as their original bytes: no re-encoding, no resizing, nothing is lost. Fakes are mostly
+PNG and reals mostly JPEG, so the file format does correlate with the label; the training pipeline
+(dataset.py) removes that by JPEG-compressing every training image at a random quality. Images whose short
+side is below `min_side` are skipped, whatever the label.
 """
 
 import csv
@@ -47,20 +48,19 @@ def load_rows(path) -> list[dict]:
         return [{**r, "label": int(r["label"])} for r in csv.DictReader(f)]
 
 
-def _store(data: bytes, path: Path, max_side: int, min_side: int):
-    """Decode, skip if too small or broken, shrink to max_side, save JPEG q95. Returns the stored size or None."""
+def _store(data: bytes, stem: Path, min_side: int):
+    """Writes the original bytes untouched, with the extension of their format (only the header is read).
+    Skips broken images and images whose short side is below min_side. Returns (path, size) or None."""
     try:
         with Image.open(io.BytesIO(data)) as im:
-            im = im.convert("RGB")
+            size, fmt = im.size, im.format or "bin"
     except (OSError, ValueError, Image.DecompressionBombError):
         return None
-    if min(im.size) < min_side:
+    if min(size) < min_side:
         return None
-    scale = max_side / max(im.size)
-    if scale < 1:
-        im = im.resize((round(im.width * scale), round(im.height * scale)), Image.LANCZOS)
-    im.save(path, format="JPEG", quality=95)
-    return im.size
+    path = stem.with_suffix("." + {"JPEG": "jpg"}.get(fmt, fmt.lower()))
+    path.write_bytes(data)
+    return path, size
 
 
 def _files(repo: str, prefix: str) -> list[str]:
@@ -85,7 +85,7 @@ def _rows(repo: str, name: str, tmp_dir: Path, columns: list[str]):
 
 
 def _take_file(rows_iter, i: int, out_dir: Path, quota: dict, counts: Counter, taken: Counter, lock,
-               real_sources, max_side: int, min_side: int) -> dict:
+               real_sources, min_side: int) -> dict:
     """Keeps images of file i while their shared quota is not full; `taken` records what this attempt reserved."""
     rows, read = [], 0
     for j, row in enumerate(rows_iter):
@@ -99,9 +99,9 @@ def _take_file(rows_iter, i: int, out_dir: Path, quota: dict, counts: Counter, t
                 continue
             counts[key] += 1
             taken[key] += 1
-        path = out_dir / f"{i:04d}_{j:05d}.jpg"
-        if _store(row["image"]["bytes"], path, max_side, min_side):
-            rows.append({"path": str(path), "label": label, "generator": model if label else "",
+        stored = _store(row["image"]["bytes"], out_dir / f"{i:04d}_{j:05d}", min_side)
+        if stored:
+            rows.append({"path": str(stored[0]), "label": label, "generator": model if label else "",
                          "mask": "", "source": "openfake" if label else f"openfake/{model}"})
         else:
             with lock:
@@ -110,10 +110,10 @@ def _take_file(rows_iter, i: int, out_dir: Path, quota: dict, counts: Counter, t
     return {"read": read, "rows": rows}
 
 
-def openfake(split: str, out_dir, n_real: int, n_per_model: int, real_sources=None, max_files=None,
-             workers: int = 8, max_side: int = 1024, min_side: int = 512) -> list[dict]:
+def openfake(split: str, out_dir, n_real=None, n_per_model=None, real_sources=None, max_files=None,
+             workers: int = 8, min_side: int = 512) -> list[dict]:
     """Up to n_real reals (optionally only from real_sources) and up to n_per_model images of every generator
-    (all of them if it has fewer) from the first max_files files of OpenFake core/<split> (None: all).
+    (None: no limit) from the first max_files files of OpenFake core/<split> (None: all).
 
     `workers` files are downloaded at once (~5.4 GB of temporary disk each). Every finished file is recorded
     in <out_dir>/done/, so a rerun after a crash or Ctrl+C skips it; a file that breaks is retried.
@@ -131,7 +131,8 @@ def openfake(split: str, out_dir, n_real: int, n_per_model: int, real_sources=No
     todo = [i for i in range(len(files)) if not (done_dir / f"{i:04d}.json").exists()]
     print(f"OpenFake {split}: {len(files) - len(todo)} of {len(files)} files done, "
           f"{shutil.disk_usage(out_dir).free / 1e9:.0f} GB free on disk")
-    quota, lock = {0: n_real, 1: n_per_model}, Lock()
+    quota = {0: float("inf") if n_real is None else n_real, 1: float("inf") if n_per_model is None else n_per_model}
+    lock = Lock()
 
     with tqdm(total=len(files), initial=len(files) - len(todo), unit="file", desc=f"OpenFake {split}") as bar:
         def run(i):
@@ -139,7 +140,7 @@ def openfake(split: str, out_dir, n_real: int, n_per_model: int, real_sources=No
                 taken = Counter()
                 try:
                     part = _take_file(_rows(OPENFAKE, files[i], tmp_dir, ["image", "label", "model"]), i, out_dir,
-                                      quota, counts, taken, lock, real_sources, max_side, min_side)
+                                      quota, counts, taken, lock, real_sources, min_side)
                     break
                 except Exception as e:  # network or file error: give the quota back, wait, try again
                     with lock:
@@ -167,7 +168,7 @@ def openfake(split: str, out_dir, n_real: int, n_per_model: int, real_sources=No
     return rows
 
 
-def sid_set(split: str, out_dir, n_per_class: int, max_side: int = 1024, min_side: int = 512) -> list[dict]:
+def sid_set(split: str, out_dir, n_per_class: int, min_side: int = 512) -> list[dict]:
     """SID_Set: n_per_class reals, fully synthetic and locally edited images (with masks). Rows are shuffled, so
     only the first few files are downloaded. Cached in <out_dir>.csv."""
     out_dir = Path(out_dir)
@@ -183,10 +184,10 @@ def sid_set(split: str, out_dir, n_per_class: int, max_side: int = 1024, min_sid
             kind = names[int(row["label"])]
             if counts[kind] >= n_per_class:
                 continue
-            path = out_dir / f"{i:06d}.jpg"
-            size = _store(row["image"]["bytes"], path, max_side, min_side)
-            if not size:
+            stored = _store(row["image"]["bytes"], out_dir / f"{i:06d}", min_side)
+            if not stored:
                 continue
+            path, size = stored
             mask = ""
             if kind == "edit" and row["mask"] and row["mask"]["bytes"]:
                 mask = str(out_dir / f"{i:06d}_mask.png")

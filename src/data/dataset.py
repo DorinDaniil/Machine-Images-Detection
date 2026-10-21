@@ -2,7 +2,9 @@
 ImageDataset: the same for testing, under a fixed protocol.
 
 Every image is treated by the same random rules whatever its label, so the only thing that differs
-between the classes is how the pixels were made.
+between the classes is how the pixels were made. Files on disk are untouched originals (fakes mostly PNG,
+reals mostly JPEG), so every training image is JPEG-compressed here at a random quality: the presence of
+JPEG traces then says nothing about the label.
 """
 
 import io
@@ -30,9 +32,7 @@ def degrade(image: Image.Image, rng: np.random.Generator) -> Image.Image:
     if rng.random() < 0.25:  # sensor-like noise, so "noisy = real" is not a shortcut
         x = np.asarray(image, dtype=np.float32) + rng.normal(0, rng.uniform(0.5, 4), (image.height, image.width, 1))
         image = Image.fromarray(np.clip(x.round(), 0, 255).astype(np.uint8))
-    if rng.random() < 0.5:
-        image = jpeg(image, rng.integers(50, 96), subsampling=int(rng.choice([0, 2])))
-    return image
+    return jpeg(image, rng.integers(50, 96), subsampling=int(rng.choice([0, 2])))  # always, see module docstring
 
 
 def to_tensor(image) -> torch.Tensor:

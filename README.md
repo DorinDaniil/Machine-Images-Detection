@@ -5,8 +5,8 @@ patch; the image score is the mean of the top 5 % patches, so a small edited reg
 
 Training data is simply real images and images of many generators (OpenFake: SD 1.x to FLUX.2,
 GPT-Image-1, Imagen 4, Midjourney 6 and ~70 others). Batches are balanced: half reals, half fakes
-spread evenly over generators. Every image is stored and augmented by the same rules whatever its
-label, so file format and size cannot give the answer.
+spread evenly over generators. Images are stored as untouched originals; every training image is
+JPEG-compressed at a random quality, so the file format cannot give the answer.
 
 ## Setup
 
@@ -28,8 +28,8 @@ python scripts/run_train.py --config configs/train.yaml
 python scripts/run_test.py --config configs/train.yaml
 ```
 
-- train: whole OpenFake core/train, 60k reals (LAION, Pexels) and up to 5000 images per generator
-  (all of them if it has fewer); `tiny-random-sana` (noise from a random-weight test model) is skipped;
+- train: whole OpenFake core/train, all reals (LAION, Pexels) and all images of every generator
+  (limits in the config); `tiny-random-sana` (noise from a random-weight test model) is skipped;
   15 % of the reals are kept apart for calibration;
 - threshold: 1 % false positives on the calibration reals and on rendered text, UI, charts, logos;
 - test, against reals of the same source:
@@ -42,10 +42,10 @@ python scripts/run_test.py --config configs/train.yaml
 - result: `runs/pilot/report.md`.
 
 Data: `download_data.py` fetches the 608 train files (3.3 TB) and 13 test files whole, 8 at a time,
-keeps the images the quotas allow and deletes each file: ~45 GB of temporary disk, ~0.2 MB per kept
-image, ~150 GB in all. A broken file is retried; a stopped run resumes from the finished files.
-Training: one GPU, a few hours. Generators are very unequal in size; to download less, set
-`max_files` (estimate for 72 generators from the first file):
+keeps the original bytes of the images the limits allow and deletes each file (~45 GB of temporary
+disk). The whole set is ~3 TB on disk. A broken file is retried; a stopped run resumes from the
+finished files. Training: one GPU, a few hours per epoch. Generators are very unequal in size;
+to download less, set `max_files` (estimate for 72 generators from the first file):
 
 | max_files | downloaded | generators with 5000 | with ≥ 1000 |
 |---|---|---|---|
