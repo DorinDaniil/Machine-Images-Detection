@@ -1,66 +1,89 @@
 """CPU check of the whole chain on synthetic images, no downloads. python -m pytest tests -q"""
 
+import io
+
 import numpy as np
 from PIL import Image
 
-from src.data import ImageDataset, PairDataset, blend, random_mask, render_folder
-from src.data.decoders import find, save_like
+from src.data import ImageDataset, TrainDataset, load_rows, render_folder, save_rows
+from src.data.download import _store
 from src.evaluate import report, score, threshold_at
-from src.losses import trace_loss
-from src.model import TraceDetector
-from src.train import train
+from src.losses import patch_loss
+from src.model import Detector
+from src.train import balanced_weights, train
 
 
-def make_pairs(root, n=6, size=200):
-    """Real JPEGs and a stand-in "decoder" copy saved with the same JPEG history."""
+def make_rows(root, n=8, size=200):
+    """Reals, fakes of two 'generators' (smoother images) and one locally edited image with a mask."""
     rng = np.random.default_rng(0)
-    pairs = []
+    rows = []
     for i in range(n):
-        real = np.asarray(Image.fromarray(rng.integers(0, 255, (8, 8, 3), dtype=np.uint8)).resize((size, size), Image.BICUBIC))
-        fake = np.clip(real.astype(float) + rng.normal(0, 4, real.shape), 0, 255).astype(np.uint8)
-        pair = root / f"{i:03d}"
-        pair.mkdir()
-        Image.fromarray(real).save(pair / "real.jpg", quality=90)
-        with Image.open(pair / "real.jpg") as src:
-            save_like(Image.fromarray(fake), src, pair / "sd")
-        pairs.append(pair)
-    return pairs
+        label = i % 2
+        noise = rng.integers(0, 255, (8 if label else 32, 8 if label else 32, 3), dtype=np.uint8)
+        path = root / f"{i}.jpg"
+        Image.fromarray(noise).resize((size, size), Image.BICUBIC).save(path, quality=95)
+        rows.append({"path": str(path), "label": label, "generator": f"gen{i % 4 // 2}" if label else "", "mask": "", "source": "toy"})
+    mask = np.zeros((size, size), np.uint8)
+    mask[50:120, 60:150] = 255
+    Image.fromarray(mask).save(root / "edit_mask.png")
+    rows[1]["mask"] = str(root / "edit_mask.png")
+    return rows
 
 
 def test_pipeline(tmp_path):
-    pairs = make_pairs(tmp_path)
-    assert find(pairs[0], "sd").suffix == ".jpg"
-    model = TraceDetector("tiny", layers=(0, 1), head_dim=16, topk=0.1)
-    data = PairDataset(pairs, ["sd"], crop=160)
-    item = data[0]
-    assert item["image"].shape == (3, 160, 160) and item["target"].shape == (1, 160, 160)
+    rows = make_rows(tmp_path)
+    save_rows(rows, tmp_path / "rows.csv")
+    assert load_rows(tmp_path / "rows.csv")[1]["label"] == 1
+
+    weights = balanced_weights(rows)
+    assert abs(sum(weights) - 1.0) < 1e-6  # half reals, half fakes spread over generators
+
+    model = Detector("tiny", layers=(0, 1), head_dim=16, topk=0.1)
+    item = TrainDataset(rows, crop=160)[1]
+    assert item["image"].shape == (3, 160, 160) and 0 < item["target"].mean() < 1  # masked image: partial target
 
     patch_logits, image_logit = model(item["image"][None])
     assert patch_logits.shape == (1, 1, 10, 10) and image_logit.shape == (1,)
-    trace_loss(patch_logits, image_logit, item["target"][None]).backward()
+    patch_loss(patch_logits, image_logit, item["target"][None]).backward()
 
     cfg = dict(device="cpu", out=str(tmp_path / "run"), batch_size=2, num_workers=0, lr=1e-3, weight_decay=0.0, epochs=1)
-    best = train(model, PairDataset(pairs[2:], ["sd"], 160), PairDataset(pairs[:2], ["sd"], 160, seed=1), cfg)
-    model = TraceDetector.load(best)
-
-    real = np.asarray(Image.open(find(pairs[0], "real")), dtype=np.float32)
-    fake = np.asarray(Image.open(find(pairs[0], "sd")), dtype=np.float32)
-    mask = random_mask(*real.shape[:2], np.random.default_rng(1))
-    Image.fromarray(blend(real, fake, mask)).save(tmp_path / "local.png")
-    Image.fromarray((mask * 255).astype(np.uint8)).save(tmp_path / "local_mask.png")
+    best = train(model, TrainDataset(rows[2:], 160), TrainDataset(rows[:4], 160, seed=1), cfg)
+    model = Detector.load(best)
 
     for protocol in ("native", "equalized"):
-        reals = ImageDataset([{"path": find(p, "real"), "label": 0} for p in pairs], model.patch_size, protocol, size=160)
-        fakes = ImageDataset([{"path": tmp_path / "local.png", "label": 1, "mask": tmp_path / "local_mask.png"}],
-                             model.patch_size, protocol, size=160)
-        real_scores, _ = score(model, reals, "cpu")
-        fake_scores, f1 = score(model, fakes, "cpu")
+        reals = [r for r in rows if r["label"] == 0]
+        real_scores, _ = score(model, ImageDataset(reals, model.patch_size, protocol), "cpu")
+        fake_scores, f1 = score(model, ImageDataset(rows[1:2], model.patch_size, protocol), "cpu")
         assert np.isfinite(f1).all()
-        assert "| local |" in report(real_scores[:3], real_scores[3:], {"local": (fake_scores, f1)})
+        thr = threshold_at(real_scores[:2], 0.5)
+        assert "| edit |" in report(thr, {"reals": real_scores[2:]}, [("edit", real_scores, fake_scores, f1)])
 
 
-def test_threshold_and_renders(tmp_path):
-    scores = np.linspace(0, 1, 101)
-    assert threshold_at(scores, 0.05) >= 0.94
-    items = render_folder(tmp_path, 4, "test")
+def test_store_and_renders(tmp_path):
+    buf = io.BytesIO()
+    Image.new("RGB", (2000, 1500), "gray").save(buf, format="PNG")
+    assert _store(buf.getvalue(), tmp_path / "big.jpg", 1024, 512) == (1024, 768)  # shrunk and re-saved as JPEG
+    assert _store(buf.getvalue(), tmp_path / "small.jpg", 1024, 1600) is None       # too small: skipped
+    assert threshold_at(np.linspace(0, 1, 101), 0.05) >= 0.94
+    items = render_folder(tmp_path / "renders", 4, "test")
     assert len(items) == 4 and all(min(Image.open(it["path"]).size) >= 512 for it in items)
+
+
+def test_openfake_caps(tmp_path, monkeypatch):
+    """Quotas per generator, real-source filter and caching, on a fake stream instead of the Hub."""
+    from src.data import download
+
+    def png():
+        buf = io.BytesIO()
+        Image.new("RGB", (600, 600), "white").save(buf, format="PNG")
+        return {"bytes": buf.getvalue()}
+
+    stream = [{"image": png(), "label": "real", "model": "docci" if i % 2 else "imagenet"} for i in range(6)]
+    stream += [{"image": png(), "label": "fake", "model": "gen-a" if i % 3 else "gen-b"} for i in range(9)]
+    monkeypatch.setattr(download, "_stream", lambda *a, **k: iter(stream))
+
+    rows = download.openfake("test", tmp_path / "of", n_real=2, n_per_model=2, max_rows=100, real_sources=["docci"])
+    reals = [r for r in rows if r["label"] == 0]
+    assert len(reals) == 2 and all(r["source"] == "openfake/docci" for r in reals)
+    assert sorted(r["generator"] for r in rows if r["label"]) == ["gen-a", "gen-a", "gen-b", "gen-b"]
+    assert download.openfake("test", tmp_path / "of", 2, 2, 100) == load_rows(tmp_path / "of.csv")  # cached

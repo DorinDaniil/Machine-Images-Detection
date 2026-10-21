@@ -6,11 +6,11 @@ import torch.nn as nn
 from .backbone import Backbone
 
 
-class TraceDetector(nn.Module):
+class Detector(nn.Module):
     """forward(x [B, 3, H, W]) -> patch logits [B, 1, H // p, W // p], image logit [B].
 
     The head sees the patch features of the chosen backbone blocks side by side. The image logit is the
-    mean of the top `topk` share of patch logits, so a small edited region still moves the whole score.
+    mean of the top `topk` share of patch logits, so a small generated region still moves the whole score.
     """
 
     def __init__(self, backbone: str, layers=(-1,), head_dim: int = 256, topk: float = 0.05):
@@ -43,7 +43,7 @@ class TraceDetector(nn.Module):
         torch.save({"config": self.config, "head": self.head.state_dict()}, path)
 
     @classmethod
-    def load(cls, path, device: str = "cpu") -> "TraceDetector":
+    def load(cls, path, device: str = "cpu") -> "Detector":
         ckpt = torch.load(path, map_location="cpu")
         model = cls(**ckpt["config"])
         model.head.load_state_dict(ckpt["head"])

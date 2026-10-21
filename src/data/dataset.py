@@ -1,46 +1,16 @@
-"""PairDataset: training samples made from (real, re-decoded) pairs.
-ImageDataset: plain images with labels and optional masks, for testing.
+"""TrainDataset: real and generated images with optional masks of generated regions.
+ImageDataset: the same for testing, under a fixed protocol.
 
-Three kinds of training samples, target map T in [0, 1] per pixel:
-    real   the real image, T = 0
-    full   real mixed with a re-decoded copy: (1 - a) * real + a * fake, T = a everywhere
-    local  the same mix only inside a random region M, pixels outside stay original, T = a * M
-The real and its copies share the JPEG history (see decoders.save_like), so only the decoder trace differs.
+Every image is treated by the same random rules whatever its label, so the only thing that differs
+between the classes is how the pixels were made.
 """
 
 import io
-from pathlib import Path
 
 import numpy as np
 import torch
 from PIL import Image, ImageFilter
 from torch.utils.data import Dataset
-
-from .decoders import find
-
-
-def random_mask(h: int, w: int, rng: np.random.Generator, area=(0.05, 0.6)) -> np.ndarray:
-    """1-3 rectangles or ellipses covering a random share of the image."""
-    mask = np.zeros((h, w), dtype=bool)
-    yy, xx = np.mgrid[:h, :w]
-    n = rng.integers(1, 4)
-    for _ in range(n):
-        a = rng.uniform(*area) / n * h * w  # pixels in this shape
-        ratio = rng.uniform(0.5, 2.0)       # width / height
-        cy, cx = rng.uniform(0, h), rng.uniform(0, w)
-        if rng.random() < 0.5:
-            rh = np.sqrt(a / ratio)
-            mask |= (abs(yy - cy) < rh / 2) & (abs(xx - cx) < rh * ratio / 2)
-        else:
-            ry = np.sqrt(a / (np.pi * ratio))
-            mask |= ((yy - cy) / ry) ** 2 + ((xx - cx) / (ry * ratio)) ** 2 < 1
-    return mask.astype(np.float32)
-
-
-def blend(real: np.ndarray, fake: np.ndarray, weight: np.ndarray) -> np.ndarray:
-    """weight [H, W]: share of the fake in every pixel."""
-    out = real * (1 - weight[..., None]) + fake * weight[..., None]
-    return np.clip(out.round(), 0, 255).astype(np.uint8)
 
 
 def jpeg(image: Image.Image, quality: int, subsampling: int = 2) -> Image.Image:
@@ -69,40 +39,41 @@ def to_tensor(image) -> torch.Tensor:
     return torch.from_numpy(np.array(image, dtype=np.float32) / 255).permute(2, 0, 1)
 
 
-def load_rgb(path) -> np.ndarray:
-    with Image.open(path) as im:
-        return np.asarray(im.convert("RGB"), dtype=np.float32)
+class TrainDataset(Dataset):
+    """rows: dicts with "path", "label" (0 real, 1 generated) and "mask" (path or empty).
 
+    View: short side scaled to crop * U(1, 1.7), random crop, random flip, degradations.
+    Target map: the mask if the image has one (only that region is generated), else the label everywhere.
+    """
 
-class PairDataset(Dataset):
-    def __init__(self, pairs: list, decoders: list[str], crop: int, p_real=0.3, p_full=0.3, p_local=0.4, seed=0):
-        self.pairs, self.decoders, self.crop = [Path(p) for p in pairs], list(decoders), crop
-        self.probs = np.array([p_real, p_full, p_local]) / (p_real + p_full + p_local)
-        self.seed, self.epoch = seed, 0
+    def __init__(self, rows: list[dict], crop: int, seed: int = 0):
+        self.rows, self.crop, self.seed, self.epoch = rows, crop, seed, 0
 
     def __len__(self):
-        return len(self.pairs)
+        return len(self.rows)
 
     def __getitem__(self, i):
         rng = np.random.default_rng([self.seed, self.epoch, i])
-        pair = self.pairs[i]
-        real = load_rgb(find(pair, "real"))
-        h, w = real.shape[:2]
-
-        mode = rng.choice(["real", "full", "local"], p=self.probs)
-        if mode == "real":
-            weight, fake = np.zeros((h, w), np.float32), real
+        row = self.rows[i]
+        with Image.open(row["path"]) as im:
+            image = im.convert("RGB")
+        if row.get("mask"):
+            with Image.open(row["mask"]) as m:
+                target = m.convert("L")
         else:
-            fake = load_rgb(find(pair, str(rng.choice(self.decoders))))
-            mask = np.ones((h, w), np.float32) if mode == "full" else random_mask(h, w, rng)
-            weight = rng.uniform(0.3, 1.0) * mask
-        image = blend(real, fake, weight)
+            target = Image.new("L", image.size, 255 * int(row["label"]))
 
-        c = self.crop
-        y, x = rng.integers(0, h - c + 1), rng.integers(0, w - c + 1)
-        image = degrade(Image.fromarray(image[y:y + c, x:x + c]), rng)
-        target = torch.from_numpy(weight[y:y + c, x:x + c].copy())[None]
-        return {"image": to_tensor(image), "target": target, "label": target.max()}
+        scale = self.crop * rng.uniform(1.0, 1.7) / min(image.size)
+        size = (max(self.crop, round(image.width * scale)), max(self.crop, round(image.height * scale)))
+        image, target = image.resize(size, Image.BICUBIC), target.resize(size, Image.NEAREST)
+        x, y = rng.integers(0, size[0] - self.crop + 1), rng.integers(0, size[1] - self.crop + 1)
+        box = (x, y, x + self.crop, y + self.crop)
+        image, target = image.crop(box), target.crop(box)
+        if rng.random() < 0.5:
+            image, target = image.transpose(Image.FLIP_LEFT_RIGHT), target.transpose(Image.FLIP_LEFT_RIGHT)
+
+        target = torch.from_numpy(np.array(target, dtype=np.float32) / 255)[None]
+        return {"image": to_tensor(degrade(image, rng)), "target": target, "label": float(row["label"])}
 
 
 class ImageDataset(Dataset):

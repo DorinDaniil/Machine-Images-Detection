@@ -1,7 +1,7 @@
 """python scripts/run_train.py --config configs/train.yaml
 
-Real images (COCO photos + rendered text / UI / charts / logos) -> 70/15/15 split ->
-pairs (real, re-decoded by train_decoders, same JPEG history) -> training -> runs/pilot/best.pt
+OpenFake core/train (reals + ~70 generators) -> reals split into train / calibration ->
+generator-balanced training of the patch head on a frozen DINOv3 -> runs/pilot/best.pt
 """
 
 import argparse
@@ -10,13 +10,12 @@ import random
 import sys
 from pathlib import Path
 
-import torch
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.data import PairDataset, download_coco, make_pairs, render_folder  # noqa: E402
-from src.model import TraceDetector  # noqa: E402
+from src.data import TrainDataset, openfake, render_folder  # noqa: E402
+from src.model import Detector  # noqa: E402
 from src.train import train  # noqa: E402
 
 parser = argparse.ArgumentParser()
@@ -24,33 +23,26 @@ parser.add_argument("--config", default="configs/train.yaml")
 cfg = yaml.safe_load(open(parser.parse_args().config))
 d, t = cfg["data"], cfg["train"]
 data = Path(d["dir"])
-device = t["device"] if torch.cuda.is_available() else "cpu"
 
-model = TraceDetector(**cfg["model"])
+model = Detector(**cfg["model"])
 crop = t["crop"] // model.patch_size * model.patch_size
 
+rows = openfake("train", data / "openfake_train", d["train"]["n_real"], d["train"]["n_per_model"], d["train"]["max_rows"])
+random.Random(0).shuffle(rows)
+reals, fakes = [r for r in rows if r["label"] == 0], [r for r in rows if r["label"] == 1]
+n_calib = int(0.15 * len(reals))
+calib, reals = reals[:n_calib], reals[n_calib:]
 
-def split(paths: list, seed: int = 0) -> dict:
-    paths = sorted(str(p) for p in paths)
-    random.Random(seed).shuffle(paths)
-    a, b = int(0.7 * len(paths)), int(0.85 * len(paths))
-    return {"train": paths[:a], "calib": paths[a:b], "test": paths[b:]}
+renders = [str(it["path"]) for it in render_folder(data / "renders", d["n_render"], "test")]
+json.dump({"openfake_reals": [r["path"] for r in calib], "renders": renders[: len(renders) // 2],
+           "renders_test": renders[len(renders) // 2:]}, open(data / "calibration.json", "w"), indent=1)
 
-
-# real images, split once and saved for run_test.py
-photos = split(download_coco(data / "coco", d["n_real"], min_side=crop))
-renders = split(item["path"] for item in render_folder(data / "renders", d["n_render"], "train"))
-json.dump({"photos": photos, "renders": renders}, open(data / "split.json", "w"), indent=1)
-
-# training fakes: the same images re-decoded by train_decoders
-reals = photos["train"] + renders["train"]
-pairs = make_pairs(reals, d["train_decoders"], data / "pairs", device, d["max_side"])
-random.Random(1).shuffle(pairs)
-n_val = max(1, len(pairs) // 20)
-probs = (t["p_real"], t["p_full"], t["p_local"])
-train_set = PairDataset(pairs[n_val:], d["train_decoders"], crop, *probs, seed=0)
-val_set = PairDataset(pairs[:n_val], d["train_decoders"], crop, *probs, seed=1)
-print(f"train pairs {len(train_set)}, val pairs {len(val_set)}, crop {crop}")
+pool = reals + fakes
+random.Random(1).shuffle(pool)
+n_val = max(2, len(pool) // 20)
+train_set, val_set = TrainDataset(pool[n_val:], crop, seed=0), TrainDataset(pool[:n_val], crop, seed=1)
+generators = sorted({r["generator"] for r in fakes})
+print(f"train {len(train_set)} images ({len(reals)} reals, {len(generators)} generators), val {len(val_set)}, crop {crop}")
 
 best = train(model, train_set, val_set, t)
 print(f"best checkpoint: {best}")

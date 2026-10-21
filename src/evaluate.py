@@ -6,11 +6,11 @@ import torch.nn.functional as F
 from sklearn.metrics import roc_auc_score
 from torch.utils.data import DataLoader
 
-from .model import TraceDetector
+from .model import Detector
 
 
 @torch.no_grad()
-def score(model: TraceDetector, dataset, device: str):
+def score(model: Detector, dataset, device: str):
     """Image scores and pixel F1 of the patch map (NaN where there is no mask). One image at a time."""
     model.eval().to(device)
     scores, f1 = np.zeros(len(dataset)), np.full(len(dataset), np.nan)
@@ -32,18 +32,14 @@ def threshold_at(calib_real_scores: np.ndarray, alpha: float) -> float:
     return float(s[min(k, len(s) - 1)])
 
 
-def report(calib_real: np.ndarray, test_real: np.ndarray, groups: dict, alpha: float = 0.01) -> str:
-    """Markdown table: every fake group against the same test reals.
-
-    The threshold comes from separate calibration reals, so the FPR on the test reals is a measurement, not a given.
-    """
-    thr = threshold_at(calib_real, alpha)
-    lines = [f"threshold for {alpha:.0%} FPR from {len(calib_real)} calibration reals: {thr:.4f}",
-             f"measured FPR on {len(test_real)} test reals: {(test_real > thr).mean():.3f}", "",
-             "| group | n | AUROC | TPR at threshold | pixel F1 |", "|---|---|---|---|---|"]
-    for name, (scores, f1) in groups.items():
-        labels = np.r_[np.zeros(len(test_real)), np.ones(len(scores))]
-        auroc = roc_auc_score(labels, np.r_[test_real, scores])
+def report(threshold: float, reals: dict, fakes: list) -> str:
+    """reals: {name: scores} -> measured FPR at the threshold.
+    fakes: [(name, real scores of the same source, fake scores, pixel F1)] -> AUROC and TPR per group."""
+    lines = ["| real set | n | FPR at threshold |", "|---|---|---|"]
+    lines += [f"| {name} | {len(s)} | {(s > threshold).mean():.3f} |" for name, s in reals.items()]
+    lines += ["", "| fake group | n | AUROC vs its reals | TPR at threshold | pixel F1 |", "|---|---|---|---|---|"]
+    for name, real, fake, f1 in fakes:
+        auroc = roc_auc_score(np.r_[np.zeros(len(real)), np.ones(len(fake))], np.r_[real, fake])
         pixel = f"{np.nanmean(f1):.3f}" if np.isfinite(f1).any() else ""
-        lines.append(f"| {name} | {len(scores)} | {auroc:.3f} | {(scores > thr).mean():.3f} | {pixel} |")
+        lines.append(f"| {name} | {len(fake)} | {auroc:.3f} | {(fake > threshold).mean():.3f} | {pixel} |")
     return "\n".join(lines)

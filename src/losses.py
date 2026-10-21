@@ -2,10 +2,10 @@ import torch
 import torch.nn.functional as F
 
 
-def trace_loss(patch_logits: torch.Tensor, image_logit: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    """target [B, 1, H, W]: 0 = original pixel, alpha = pixel mixed with a decoder output in share alpha.
+def patch_loss(patch_logits: torch.Tensor, image_logit: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """target [B, 1, H, W]: 1 where pixels are generated, 0 where they are real.
 
-    Patch target = mean of the target over the patch; image target = max of the target.
+    Patch target = share of generated pixels in the patch; image target = max of the target.
     """
     patch_target = F.adaptive_avg_pool2d(target, patch_logits.shape[-2:])
     image_target = target.flatten(1).amax(dim=1)

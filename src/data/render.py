@@ -1,9 +1,8 @@
 """Real non-photo images made by code: text pages, UI screens, charts, logos.
 
-No neural network touches these pixels, so they are real. They teach the detector that crisp glyphs,
-flat fills and anti-aliased edges are not a decoder trace, and they measure false positives where the
-product hurts most (screenshots, documents, logos). Fonts ship with matplotlib; train and test use
-different font families and seeds.
+No neural network touches these pixels, so they are real. They are used for calibration and to
+measure false positives where the product hurts most (screenshots, documents, logos), not for
+training: without generated counterparts they would teach "graphics = real". Fonts ship with matplotlib.
 """
 
 import io

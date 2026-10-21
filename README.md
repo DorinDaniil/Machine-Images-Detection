@@ -1,11 +1,12 @@
 # Machine-Images-Detection
 
-Detection of generated and partly generated images. A frozen DINOv3 with a small head predicts,
-for every patch, whether its pixels came out of a generator's decoder.
+Detection of generated and partly generated images. A frozen DINOv3 with a small head scores every
+patch; the image score is the mean of the top 5 % patches, so a small edited region still counts.
 
-Training uses no generated images: fakes are real images passed through a generator's
-autoencoder, `decode(encode(x))`, fully or inside a random region, saved with the same JPEG
-history as the original, so only the decoder trace differs.
+Training data is simply real images and images of many generators (OpenFake: SD 1.x to FLUX.2,
+GPT-Image-1, Imagen 4, Midjourney 6 and ~70 others). Batches are balanced: half reals, half fakes
+spread evenly over generators. Every image is stored and augmented by the same rules whatever its
+label, so file format and size cannot give the answer.
 
 ## Setup
 
@@ -16,6 +17,7 @@ python -m pytest tests -q
 ```
 
 All weights and data are on Hugging Face without access requests (DINOv3 through timm).
+OpenFake is CC BY-NC 4.0: research use.
 
 ## Pilot
 
@@ -24,20 +26,20 @@ python scripts/run_train.py --config configs/train.yaml
 python scripts/run_test.py --config configs/train.yaml
 ```
 
-- reals: 2000 COCO photos and 400 rendered text pages, UI screens, charts and logos, split 70/15/15
-  into train, calibration and test;
-- training fakes: the train reals re-decoded by the SD and FLUX.1 autoencoders;
-- test fakes: the test reals re-decoded by SDXL (seen family) and FLUX.2, Qwen-Image and DC-AE
-  (unseen families), fully and in one region with a mask; 200 images of each of nine closed
-  generators from Qwen-Image-Bench (GPT-Image-2, Nano Banana Pro and 2, FLUX.2 Pro, Seedream 4.5,
-  Imagen 4, Qwen-Image, Hunyuan Image 3, Kling);
-- threshold: 1 % false positives on the calibration reals; false positives are then measured on
-  the test photos and test renders;
-- protocols: `equalized` (every image resized, cropped and JPEG-compressed the same way, so size and
-  file format cannot give the answer) and `native`;
-- result: `runs/pilot/report.md` with AUROC, TPR at the threshold and pixel F1 per group.
+- train: OpenFake core/train, 5000 reals (LAION, Pexels) and up to 150 images per generator;
+  15 % of the reals are kept apart for calibration;
+- threshold: 1 % false positives on the calibration reals and on rendered text, UI, charts, logos;
+- test, against reals of the same source:
+  - OpenFake core/test: newer generators (GPT-Image-1.5 and 2, Nano Banana Pro, Seedream 5,
+    Midjourney 7, FLUX.2-klein-9B, Z-Image-Turbo, video frames of Veo 3 and Sora 2) vs DOCCI photos;
+    generators that also appear in training are marked;
+  - SID_Set: fully synthetic and locally edited images (pixel F1 from masks) vs SID reals;
+  - rendered non-photo images: measured false positives;
+- protocols: `equalized` (every image resized, cropped and JPEG-compressed the same way) and `native`;
+- result: `runs/pilot/report.md`.
 
-Downloads about 6 GB; one GPU, about an hour.
+Streams about 30 shards of 5 GB (only kept images are written, ~5 GB on disk); one GPU, a few hours.
+Fewer rows: lower `max_rows` in the config.
 
 ## Layout
 
@@ -45,10 +47,9 @@ Downloads about 6 GB; one GPU, about an hour.
 src/backbone.py   frozen DINOv3 (timm) -> patch features of chosen blocks
 src/model.py      head, top-k pooling, save / load
 src/losses.py     patch and image BCE
-src/train.py      training loop
+src/train.py      training loop, generator-balanced sampling
 src/evaluate.py   scores, threshold from calibration reals, report table
-src/data/         download.py (COCO, Qwen-Image-Bench), decoders.py (8 autoencoders, JPEG history),
-                  render.py (text, UI, chart, logo reals), dataset.py
+src/data/         download.py (OpenFake, SID_Set), render.py (non-photo reals), dataset.py
 scripts/          run_train.py, run_test.py
 configs/          train.yaml
 notebooks/        quickstart.ipynb
