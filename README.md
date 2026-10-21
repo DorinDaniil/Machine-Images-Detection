@@ -18,7 +18,7 @@ python -m pytest tests -q
 
 Weights and data download from Hugging Face without access requests. DINOv3 comes from the timm copy
 (Meta DINOv3 license: commercial use allowed, cite DINOv3 in papers). OpenFake is CC BY-NC 4.0: research use.
-For long streams log in once (`hf auth login`, a read token): anonymous downloads are rate-limited.
+Log in once on the download machine (`hf auth login`, a read token): anonymous downloads are rate-limited.
 
 ## Pilot
 
@@ -43,15 +43,15 @@ python scripts/run_test.py --config configs/train.yaml
 
 Data: `download_data.py` fetches the 608 train files (3.3 TB) and 13 test files whole, 8 at a time,
 keeps the images the quotas allow and deletes each file: ~45 GB of temporary disk, ~0.2 MB per kept
-image. A broken file is retried; a stopped run resumes from the finished files. Training: one GPU,
-a few hours. Generators are very unequal in size; to download less, set `max_rows` (estimate for
-72 generators from the first file):
+image, ~150 GB in all. A broken file is retried; a stopped run resumes from the finished files.
+Training: one GPU, a few hours. Generators are very unequal in size; to download less, set
+`max_files` (estimate for 72 generators from the first file):
 
-| max_rows | downloaded | generators with 5000 | with ≥ 1000 | disk |
-|---|---|---|---|---|
-| 400k | 0.6 TB | 13 | 33 | ~50 GB |
-| 800k | 1.1 TB | 21 | 47 | ~57 GB |
-| null (all 2.3M) | 3.3 TB | 34 | 63 | ~75 GB |
+| max_files | downloaded | generators with 5000 | with ≥ 1000 |
+|---|---|---|---|
+| 100 | 0.5 TB | 13 | 33 |
+| 200 | 1.1 TB | 21 | 47 |
+| null (all 608) | 3.3 TB | 34 | 63 |
 
 ## Layout
 

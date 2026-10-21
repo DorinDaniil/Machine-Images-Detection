@@ -81,10 +81,10 @@ class FakeHub:
         self.rows = [{"image": {"bytes": buf.getvalue()}, "label": label, "model": model} for label, model in kinds for _ in range(9)]
         self.fail, self.opened = {}, []
 
-    def files(self, split):
+    def files(self, repo, prefix):
         return ["f0", "f1", "f2"]
 
-    def read(self, name, tmp_dir):
+    def read(self, repo, name, tmp_dir, columns):
         self.opened.append(name)
         k = int(name[1])
         part = self.rows[k * len(self.rows) // 3:(k + 1) * len(self.rows) // 3]
@@ -132,9 +132,10 @@ def test_openfake_caps(tmp_path, monkeypatch):
     caching; no Hub."""
     download, _ = fake_hub(monkeypatch)
 
-    for workers, max_rows, out in ((1, None, "one"), (3, 100, "three")):
-        rows = download.openfake("test", tmp_path / out, n_real=2, n_per_model=2, max_rows=max_rows, real_sources=["docci"], workers=workers)
+    for workers, max_files, out in ((1, None, "one"), (3, 3, "three")):
+        rows = download.openfake("test", tmp_path / out, n_real=2, n_per_model=2, real_sources=["docci"], max_files=max_files, workers=workers)
         reals = [r for r in rows if r["label"] == 0]
         assert len(reals) == 2 and all(r["source"] == "openfake/docci" for r in reals)
         assert sorted(r["generator"] for r in rows if r["label"]) == ["gen-a", "gen-a", "gen-b", "gen-b"]
-    assert download.openfake("test", tmp_path / "three", 2, 2, 100) == load_rows(tmp_path / "three.csv")  # cached
+    assert download.openfake("test", tmp_path / "three", 2, 2) == load_rows(tmp_path / "three.csv")  # cached
+    assert not [r for r in download.openfake("test", tmp_path / "first", 9, 9, max_files=1) if r["label"]]  # file 0: reals only
