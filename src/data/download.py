@@ -85,13 +85,14 @@ def _rows(repo: str, name: str, tmp_dir: Path, columns: list[str]):
 
 
 def _take_file(rows_iter, i: int, out_dir: Path, quota: dict, counts: Counter, taken: Counter, lock,
-               real_sources, min_side: int) -> dict:
+               real_sources, generators, min_side: int) -> dict:
     """Keeps images of file i while their shared quota is not full; `taken` records what this attempt reserved."""
     rows, read = [], 0
     for j, row in enumerate(rows_iter):
         read += 1
         label, model = int(row["label"] == "fake"), row["model"]
-        if model in SKIP or (label == 0 and real_sources and model not in real_sources):
+        wanted = model not in SKIP and (not generators or model in generators) if label else (not real_sources or model in real_sources)
+        if not wanted:
             continue
         key = model if label else "real"
         with lock:
@@ -110,10 +111,11 @@ def _take_file(rows_iter, i: int, out_dir: Path, quota: dict, counts: Counter, t
     return {"read": read, "rows": rows}
 
 
-def openfake(split: str, out_dir, n_real=None, n_per_model=None, real_sources=None, max_files=None,
-             workers: int = 8, min_side: int = 512) -> list[dict]:
+def openfake(split: str, out_dir, n_real=None, n_per_model=None, real_sources=None, generators=None,
+             max_files=None, workers: int = 8, min_side: int = 512) -> list[dict]:
     """Up to n_real reals (optionally only from real_sources) and up to n_per_model images of every generator
-    (None: no limit) from the first max_files files of OpenFake core/<split> (None: all).
+    (optionally only those in `generators`; None: no limit) from the first max_files files of OpenFake
+    core/<split> (None: all). With a generator list the download stops as soon as every quota is full.
 
     `workers` files are downloaded at once (~5.4 GB of temporary disk each). Every finished file is recorded
     in <out_dir>/done/, so a rerun after a crash or Ctrl+C skips it; a file that breaks is retried.
@@ -134,13 +136,19 @@ def openfake(split: str, out_dir, n_real=None, n_per_model=None, real_sources=No
     quota = {0: float("inf") if n_real is None else n_real, 1: float("inf") if n_per_model is None else n_per_model}
     lock = Lock()
 
+    def full() -> bool:  # every quota reached: only knowable with a generator list
+        with lock:
+            return bool(generators) and counts["real"] >= quota[0] and all(counts[g] >= quota[1] for g in generators)
+
     with tqdm(total=len(files), initial=len(files) - len(todo), unit="file", desc=f"OpenFake {split}") as bar:
         def run(i):
+            if full():
+                return
             for attempt in range(1, ATTEMPTS + 1):
                 taken = Counter()
                 try:
                     part = _take_file(_rows(OPENFAKE, files[i], tmp_dir, ["image", "label", "model"]), i, out_dir,
-                                      quota, counts, taken, lock, real_sources, min_side)
+                                      quota, counts, taken, lock, real_sources, generators, min_side)
                     break
                 except Exception as e:  # network or file error: give the quota back, wait, try again
                     with lock:
@@ -165,6 +173,8 @@ def openfake(split: str, out_dir, n_real=None, n_per_model=None, real_sources=No
     save_rows(rows, cache)
     gens = Counter(r["generator"] for r in rows if r["label"])
     print(f"OpenFake {split}: {len(rows) - sum(gens.values())} reals, {sum(gens.values())} fakes from {len(gens)} generators")
+    for g, n in gens.most_common():
+        print(f"  {n:7d}  {g}")
     return rows
 
 

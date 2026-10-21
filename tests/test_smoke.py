@@ -132,7 +132,7 @@ def test_openfake_resume(tmp_path, monkeypatch):
 def test_openfake_caps(tmp_path, monkeypatch):
     """Quotas shared by threads even when files are grouped by generator, real-source filter, skipped noise model,
     caching; no Hub."""
-    download, _ = fake_hub(monkeypatch)
+    download, hub = fake_hub(monkeypatch)
 
     for workers, max_files, out in ((1, None, "one"), (3, 3, "three")):
         rows = download.openfake("test", tmp_path / out, n_real=2, n_per_model=2, real_sources=["docci"], max_files=max_files, workers=workers)
@@ -142,3 +142,7 @@ def test_openfake_caps(tmp_path, monkeypatch):
     assert download.openfake("test", tmp_path / "three", 2, 2) == load_rows(tmp_path / "three.csv")  # cached
     assert not [r for r in download.openfake("test", tmp_path / "first", 9, 9, max_files=1) if r["label"]]  # file 0: reals only
     assert len(download.openfake("test", tmp_path / "all", real_sources=["docci"])) == 27  # no limits: 9 docci, 9 gen-a, 9 gen-b
+
+    hub.opened = []  # generator list: only gen-a is kept, and file 2 is never opened once every quota is full
+    rows = download.openfake("test", tmp_path / "gen", n_real=2, n_per_model=2, real_sources=["docci"], generators=["gen-a"], workers=1)
+    assert sorted(r["generator"] for r in rows if r["label"]) == ["gen-a", "gen-a"] and hub.opened == ["f0", "f1"]

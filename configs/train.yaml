@@ -1,13 +1,37 @@
 # Real images vs images of many open and API generators (OpenFake), frozen DINOv3 + patch head.
 # Test on newer generators, other real sources, local edits and non-photo reals.
+# Pilot: ~100k reals and ~100k fakes of 21 popular and recent generators, ~1 TB downloaded, ~0.25 TB on disk.
 
 data:
   dir: data
   workers: 8                # OpenFake files downloaded at once, ~5.4 GB of temporary disk each
-  train:                    # OpenFake core/train: 608 files, 3.3 TB downloaded; images kept as original bytes
-    n_real: null            # LAION and Pexels photos; null: all (~590k usable); 15 % are kept apart for calibration
-    n_per_model: null       # cap per generator; null: all (SD 3.5 ~150k, rare fine-tunes a few hundred)
-    max_files: null         # null: all 608; a few for a quick run
+  train:                    # OpenFake core/train: 608 files of ~3800 rows; images kept as original bytes
+    n_real: 100000          # LAION and Pexels photos; 15 % are kept apart for calibration. null: all (~590k usable)
+    n_per_model: 5000       # cap per generator; smaller generators give all they have. null: no cap
+    generators:             # null: all 72. Listed: API models and open flagships; the rest (community
+      - gpt-image-1         #   fine-tunes, anime, video frames) stays out of this pilot
+      - dalle-3
+      - imagen-3.0-002
+      - imagen-4.0
+      - midjourney-6
+      - ideogram-3.0
+      - flux-1.1-pro
+      - grok-2-image-1212
+      - seedream-v4.0
+      - nano-banana-2
+      - sd-1.5
+      - sd-2.1
+      - sdxl
+      - sd-3.5
+      - flux.1-dev
+      - flux.1-schnell
+      - flux.2-dev
+      - flux.2-klein-4b
+      - hidream-i1-full
+      - qwen-image
+      - chroma
+    max_files: 200          # ~1.1 TB downloaded; enough for 5000 of every generator above with >15k images.
+                            #   Rare ones (nano-banana-2, seedream, grok) give what these files hold. null: all 608
   test:                     # OpenFake core/test: 13 files, 68 GB; newer generators, DOCCI reals
     n_real: 5000
     real_sources: [docci]
@@ -24,7 +48,7 @@ model:
 
 train:
   crop: 448
-  epochs: 3                 # ~1.7M images per epoch with the whole of OpenFake
+  epochs: 5
   batch_size: 32
   lr: 3.0e-4
   weight_decay: 0.05
