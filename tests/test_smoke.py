@@ -3,6 +3,7 @@
 import io
 
 import numpy as np
+import pytest
 from PIL import Image
 
 from src.data import ImageDataset, TrainDataset, load_rows, render_folder, save_rows
@@ -70,11 +71,49 @@ def test_store_and_renders(tmp_path):
 
 
 class FakeStream(list):
-    """Stands in for a streamed Hub split of 3 files: shard k is the k-th contiguous third."""
+    """Stands in for a streamed Hub split of 3 files: file k is the k-th contiguous third.
+    File `fail` loses its connection halfway; `opened` lists the files that were read."""
     n_shards = 3
 
+    def __init__(self, rows, fail=None):
+        super().__init__(rows)
+        self.fail, self.opened = fail, []
+
     def shard(self, n, k):
-        return FakeStream(self[k * len(self) // n:(k + 1) * len(self) // n])
+        self.opened.append(k)
+        part = self[k * len(self) // n:(k + 1) * len(self) // n]
+        return broken(part) if k == self.fail else part
+
+
+def broken(rows):
+    yield from rows[: len(rows) // 2]
+    raise ConnectionError("connection lost")
+
+
+def fake_openfake_rows():
+    """9 rows of each kind, grouped by kind as in OpenFake test files."""
+    buf = io.BytesIO()
+    Image.new("RGB", (600, 600), "white").save(buf, format="PNG")
+    kinds = [("real", "docci"), ("real", "imagenet"), ("fake", "gen-a"), ("fake", "gen-b"), ("fake", "tiny-random-sana")]
+    return [{"image": {"bytes": buf.getvalue()}, "label": label, "model": model} for label, model in kinds for _ in range(9)]
+
+
+def test_openfake_resume(tmp_path, monkeypatch):
+    """A crash in one file keeps the finished files; the rerun reads only the broken file and respects the quotas."""
+    from src.data import download
+
+    stream = FakeStream(fake_openfake_rows(), fail=2)
+    monkeypatch.setattr(download, "_stream", lambda *a, **k: stream)
+    with pytest.raises(ConnectionError):
+        download.openfake("test", tmp_path / "of", n_real=2, n_per_model=2, workers=3)
+    assert sorted(p.name for p in (tmp_path / "of" / "done").glob("*.json")) == ["0000.json", "0001.json"]
+    assert not (tmp_path / "of.csv").exists()
+
+    stream.fail, stream.opened = None, []
+    rows = download.openfake("test", tmp_path / "of", n_real=2, n_per_model=2, workers=3)
+    assert stream.opened == [2]
+    assert sum(r["label"] == 0 for r in rows) == 2
+    assert sorted(r["generator"] for r in rows if r["label"]) == ["gen-a", "gen-a", "gen-b", "gen-b"]
 
 
 def test_openfake_caps(tmp_path, monkeypatch):
@@ -82,10 +121,7 @@ def test_openfake_caps(tmp_path, monkeypatch):
     caching; no Hub."""
     from src.data import download
 
-    buf = io.BytesIO()
-    Image.new("RGB", (600, 600), "white").save(buf, format="PNG")
-    kinds = [("real", "docci"), ("real", "imagenet"), ("fake", "gen-a"), ("fake", "gen-b"), ("fake", "tiny-random-sana")]
-    stream = FakeStream({"image": {"bytes": buf.getvalue()}, "label": label, "model": model} for label, model in kinds for _ in range(9))
+    stream = FakeStream(fake_openfake_rows())
     monkeypatch.setattr(download, "_stream", lambda *a, **k: stream)
 
     for workers, max_rows, out in ((1, None, "one"), (3, 100, "three")):

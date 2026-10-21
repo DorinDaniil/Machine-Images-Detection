@@ -41,7 +41,8 @@ python scripts/run_test.py --config configs/train.yaml
 - result: `runs/pilot/report.md`.
 
 Data: 8 threads stream 3.3 TB of train and 68 GB of test. Nothing but the kept images is written:
-~0.2 MB each, ~75 GB in all. Training: one GPU, a few hours. Generators are very unequal in size;
+~0.2 MB each, ~75 GB in all. A stopped or crashed download resumes: run the same command again, finished files are skipped.
+Training: one GPU, a few hours. Generators are very unequal in size;
 to stream less, set `max_rows` (estimate for 72 generators from the first file):
 
 | max_rows | streamed | generators with 5000 | with ≥ 1000 | disk |

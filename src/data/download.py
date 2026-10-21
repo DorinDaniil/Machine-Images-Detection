@@ -15,9 +15,9 @@ information about the label.
 
 import csv
 import io
+import json
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
-from itertools import islice
 from pathlib import Path
 from threading import Lock
 
@@ -63,11 +63,12 @@ def _stream(repo: str, config: str, split: str, columns: list[str]):
     return ds
 
 
-def _take(stream, out_dir: Path, prefix: str, max_rows, quota: dict, counts: Counter, lock, real_sources,
-          max_side: int, min_side: int, bar) -> list[dict]:
-    """One thread: reads up to max_rows rows of its files (None: all), keeps images while their shared quota is not full."""
-    rows = []
-    for i, row in enumerate(islice(stream, max_rows)):
+def _take_file(stream, i: int, out_dir: Path, quota: dict, counts: Counter, lock, real_sources,
+               max_side: int, min_side: int, bar) -> dict:
+    """Reads file i of the split, keeps images while their shared quota is not full. Returns {"read", "rows"}."""
+    rows, read = [], 0
+    for j, row in enumerate(stream):
+        read += 1
         bar.update(1)
         label, model = int(row["label"] == "fake"), row["model"]
         if model in SKIP or (label == 0 and real_sources and model not in real_sources):
@@ -77,38 +78,54 @@ def _take(stream, out_dir: Path, prefix: str, max_rows, quota: dict, counts: Cou
             if counts[key] >= quota[label]:
                 continue
             counts[key] += 1
-        path = out_dir / f"{prefix}{i:07d}.jpg"
+        path = out_dir / f"{i:04d}_{j:05d}.jpg"
         if _store(row["image"]["bytes"], path, max_side, min_side):
             rows.append({"path": str(path), "label": label, "generator": model if label else "",
                          "mask": "", "source": "openfake" if label else f"openfake/{model}"})
         else:
             with lock:
                 counts[key] -= 1
-    return rows
+    return {"read": read, "rows": rows}
 
 
 def openfake(split: str, out_dir, n_real: int, n_per_model: int, max_rows=None, real_sources=None,
              workers: int = 8, max_side: int = 1024, min_side: int = 512) -> list[dict]:
     """Up to n_real reals (optionally only from real_sources) and up to n_per_model images of every generator
-    (all of them if it has fewer), from the first max_rows rows of OpenFake core/<split> (None: whole split).
-    `workers` threads read separate files and share the quotas. Cached in <out_dir>.csv."""
+    (all of them if it has fewer), from OpenFake core/<split>. `workers` threads read separate files and share
+    the quotas; no new file is started once max_rows rows are read (None: whole split).
+
+    Resumable: every finished file is recorded in <out_dir>/done/, and a rerun after a crash or Ctrl+C
+    skips those files. Only files that were in progress are read again. Result cached in <out_dir>.csv."""
     out_dir = Path(out_dir)
-    cache = out_dir.with_suffix(".csv")
+    cache, done_dir = out_dir.with_suffix(".csv"), out_dir / "done"
     if cache.exists():
         return load_rows(cache)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    done_dir.mkdir(parents=True, exist_ok=True)
 
     stream = _stream("ComplexDataLab/OpenFake", "core", split, ["image"])
-    n = min(workers, stream.n_shards) if workers > 1 else 1
-    parts = [stream.shard(n, k) for k in range(n)] if n > 1 else [stream]
-    quota, counts, lock = {0: n_real, 1: n_per_model}, Counter(), Lock()
-    with tqdm(total=max_rows, desc=f"OpenFake {split}") as bar, ThreadPoolExecutor(n) as pool:
-        per_part = [None if max_rows is None else max_rows // n + (k < max_rows % n) for k in range(n)]
-        jobs = [pool.submit(_take, parts[k], out_dir, f"{k:02d}_", per_part[k], quota, counts, lock, real_sources,
-                            max_side, min_side, bar) for k in range(n)]
-        rows = [r for job in jobs for r in job.result()]
+    done = [json.loads(p.read_text()) for p in done_dir.glob("*.json")]
+    counts = Counter(r["generator"] if r["label"] else "real" for d in done for r in d["rows"])
+    todo = [i for i in range(stream.n_shards) if not (done_dir / f"{i:04d}.json").exists()]
+    print(f"OpenFake {split}: {stream.n_shards - len(todo)} of {stream.n_shards} files already done")
+    quota, lock = {0: n_real, 1: n_per_model}, Lock()
+
+    with tqdm(total=max_rows, initial=sum(d["read"] for d in done), desc=f"OpenFake {split}") as bar:
+        def run(i):
+            if max_rows is not None and bar.n >= max_rows:
+                return
+            part = _take_file(stream.shard(stream.n_shards, i), i, out_dir, quota, counts, lock, real_sources,
+                              max_side, min_side, bar)
+            tmp = done_dir / f"{i:04d}.tmp"
+            tmp.write_text(json.dumps(part))
+            tmp.replace(done_dir / f"{i:04d}.json")  # appears only when the file is complete
+
+        with ThreadPoolExecutor(workers) as pool:
+            list(pool.map(run, todo))
+
+    rows = [r for p in sorted(done_dir.glob("*.json")) for r in json.loads(p.read_text())["rows"]]
     save_rows(rows, cache)
-    print(f"OpenFake {split}: {counts['real']} reals, {len(rows) - counts['real']} fakes from {len(counts) - ('real' in counts)} generators")
+    gens = Counter(r["generator"] for r in rows if r["label"])
+    print(f"OpenFake {split}: {len(rows) - sum(gens.values())} reals, {sum(gens.values())} fakes from {len(gens)} generators")
     return rows
 
 
