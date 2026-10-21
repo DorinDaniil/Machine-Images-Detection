@@ -88,8 +88,8 @@ def test_openfake_caps(tmp_path, monkeypatch):
     stream = FakeStream({"image": {"bytes": buf.getvalue()}, "label": label, "model": model} for label, model in kinds for _ in range(9))
     monkeypatch.setattr(download, "_stream", lambda *a, **k: stream)
 
-    for workers, out in ((1, "one"), (3, "three")):
-        rows = download.openfake("test", tmp_path / out, n_real=2, n_per_model=2, max_rows=100, real_sources=["docci"], workers=workers)
+    for workers, max_rows, out in ((1, None, "one"), (3, 100, "three")):
+        rows = download.openfake("test", tmp_path / out, n_real=2, n_per_model=2, max_rows=max_rows, real_sources=["docci"], workers=workers)
         reals = [r for r in rows if r["label"] == 0]
         assert len(reals) == 2 and all(r["source"] == "openfake/docci" for r in reals)
         assert sorted(r["generator"] for r in rows if r["label"]) == ["gen-a", "gen-a", "gen-b", "gen-b"]

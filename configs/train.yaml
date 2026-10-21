@@ -5,11 +5,11 @@ data:
   dir: data
   workers: 8                # threads streaming separate files of a split
   train:                    # OpenFake core/train: 2.3M rows, 3.3 TB, generators mixed in every file
-    max_rows: 400000        # rows read: ~570 GB streamed, ~80 GB kept on disk
+    max_rows: null          # whole split: 3.3 TB streamed, only kept images written (~75 GB with test)
     n_real: 60000           # LAION and Pexels photos; 15 % of them are kept apart for calibration
-    n_per_model: 5000       # cap per generator; ~13 generators reach it at 400k rows, ~35 on the whole split
+    n_per_model: 5000       # cap per generator; smaller generators give all they have
   test:                     # OpenFake core/test (68 GB, read whole): newer generators, DOCCI reals
-    max_rows: 100000
+    max_rows: null
     n_real: 5000
     real_sources: [docci]
     n_per_model: 1000

@@ -27,8 +27,8 @@ python scripts/run_train.py --config configs/train.yaml
 python scripts/run_test.py --config configs/train.yaml
 ```
 
-- train: first 400k rows of OpenFake core/train, 60k reals (LAION, Pexels) and up to 5000 images
-  per generator; `tiny-random-sana` (noise from a random-weight test model) is skipped;
+- train: whole OpenFake core/train, 60k reals (LAION, Pexels) and up to 5000 images per generator
+  (all of them if it has fewer); `tiny-random-sana` (noise from a random-weight test model) is skipped;
   15 % of the reals are kept apart for calibration;
 - threshold: 1 % false positives on the calibration reals and on rendered text, UI, charts, logos;
 - test, against reals of the same source:
@@ -40,16 +40,15 @@ python scripts/run_test.py --config configs/train.yaml
 - protocols: `equalized` (every image resized, cropped and JPEG-compressed the same way) and `native`;
 - result: `runs/pilot/report.md`.
 
-Data: 8 threads stream ~570 GB of train and 68 GB of test; only kept images are written (~80 GB).
-Training: one GPU, a few hours. Generators are mixed in every train file and very unequal in size,
-so `max_rows` decides how many of them reach 5000 (estimate from the first file):
+Data: 8 threads stream 3.3 TB of train and 68 GB of test. Nothing but the kept images is written:
+~0.2 MB each, ~75 GB in all. Training: one GPU, a few hours. Generators are very unequal in size;
+to stream less, set `max_rows` (estimate for 72 generators from the first file):
 
-| max_rows | streamed | generators with 5000 | with ≥ 1000 |
-|---|---|---|---|
-| 200k | 0.3 TB | 3 | 24 |
-| 400k | 0.6 TB | 13 | 34 |
-| 800k | 1.1 TB | 21 | 48 |
-| 2.3M (all) | 3.3 TB | 35 | 64 |
+| max_rows | streamed | generators with 5000 | with ≥ 1000 | disk |
+|---|---|---|---|---|
+| 400k | 0.6 TB | 13 | 33 | ~50 GB |
+| 800k | 1.1 TB | 21 | 47 | ~57 GB |
+| null (all 2.3M) | 3.3 TB | 34 | 63 | ~75 GB |
 
 ## Layout
 
