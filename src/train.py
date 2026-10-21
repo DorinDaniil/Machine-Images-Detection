@@ -15,7 +15,8 @@ def val_auroc(model: TraceDetector, loader: DataLoader, device: str) -> float:
     model.eval()
     labels, scores = [], []
     for batch in loader:
-        _, image_logit = model(batch["image"].to(device))
+        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device == "cuda"):
+            _, image_logit = model(batch["image"].to(device))
         scores.append(image_logit.float().cpu())
         labels.append(batch["label"] > 0)
     labels, scores = torch.cat(labels).numpy(), torch.cat(scores).numpy()
@@ -59,7 +60,8 @@ def train(model: TraceDetector, train_set, val_set, cfg: dict) -> Path:
         auc = val_auroc(model, val_loader, device)
         print(f"epoch {epoch + 1}: train loss {np.mean(losses):.4f}, val AUROC {auc:.4f}")
         model.save(out / "last.pt")
-        if auc >= best or math.isnan(auc):
+        auc = -1.0 if math.isnan(auc) else auc  # NaN when the validation set has one class only
+        if auc >= best:
             best = auc
             model.save(out / "best.pt")
     return out / "best.pt"

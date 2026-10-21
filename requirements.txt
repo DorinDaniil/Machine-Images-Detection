@@ -1,6 +1,6 @@
 torch>=2.8          # GPU build: pip install torch --index-url https://download.pytorch.org/whl/cu128
-transformers>=4.56
-diffusers>=0.35
+timm>=1.0.20        # DINOv3 weights without an access request
+diffusers>=0.41     # decoders: AutoencoderKL, AutoencoderKLFlux2, AutoencoderKLQwenImage, AutoencoderKLWan, AutoencoderDC
 huggingface_hub>=0.34
 datasets>=3.0
 numpy

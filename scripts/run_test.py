@@ -1,11 +1,11 @@
 """python scripts/run_test.py --config configs/train.yaml
 
+Threshold: the score exceeded by alpha of the CALIBRATION reals (held out, never used for metrics).
 Test images:
-    real        held-out COCO photos
-    <vae> full  the same photos fully re-decoded by a VAE not seen in training
-    <vae> local the same photos with one re-decoded region (mask saved, pixel F1 reported)
-    <model>     images of real generators from Qwen/Qwen-Image-Bench
-Threshold: the score exceeded by 1 % of the real photos. Result: runs/pilot/report.md
+    real photos / real renders   held-out test reals; their FPR at the threshold is measured
+    <decoder> full / local       the same test reals re-decoded by test_decoders (local: one region, mask kept)
+    <generator>                  images of closed generators from Qwen/Qwen-Image-Bench
+Protocols: "equalized" (same resize, crop and JPEG for every image) and "native". Result: runs/pilot/report.md
 """
 
 import argparse
@@ -20,42 +20,60 @@ from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.data import ImageDataset, blend, download_fakes, make_pairs, random_mask  # noqa: E402
-from src.evaluate import report, score  # noqa: E402
+from src.data import ImageDataset, blend, download_fakes, family, make_pairs, random_mask  # noqa: E402
+from src.data.decoders import find  # noqa: E402
+from src.evaluate import report, score, threshold_at  # noqa: E402
 from src.model import TraceDetector  # noqa: E402
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--config", default="configs/train.yaml")
 cfg = yaml.safe_load(open(parser.parse_args().config))
-d, t = cfg["data"], cfg["train"]
+d, t, test = cfg["data"], cfg["train"], cfg["test"]
 data, out = Path(d["dir"]), Path(t["out"])
 device = t["device"] if torch.cuda.is_available() else "cpu"
 model = TraceDetector.load(out / "best.pt", device)
-
-# held-out photos and their copies re-decoded by unseen VAEs
 split = json.load(open(data / "split.json"))
-pairs = make_pairs(split["test"], d["test_vae"], data / "pairs_test", device, d["max_side"])
-reals = [{"path": p / "real.png", "label": 0} for p in pairs]
-groups = {f"{vae} {kind}": [] for vae in d["test_vae"] for kind in ("full", "local")}
+
+
+def items(paths, label=0):
+    return [{"path": p, "label": label} for p in paths]
+
+
+calib = items(split["photos"]["calib"] + split["renders"]["calib"])
+reals = {"real photos": items(split["photos"]["test"]), "real renders": items(split["renders"]["test"])}
+
+# held-out reals re-decoded by test decoders: full copy and one local region (mask saved)
+fakes = {}
+test_reals = split["photos"]["test"] + split["renders"]["test"]
+pairs = make_pairs(test_reals, d["test_decoders"], data / "pairs_test", device, d["max_side"])
 rng = np.random.default_rng(0)
-for p in pairs:
-    real = np.asarray(Image.open(p / "real.png"), dtype=np.float32)
-    for vae in d["test_vae"]:
-        fake = np.asarray(Image.open(p / f"{vae}.png"), dtype=np.float32)
+for dec in d["test_decoders"]:
+    name = f"{dec} ({family(dec)}, {'seen' if family(dec) in {family(x) for x in d['train_decoders']} else 'unseen'})"
+    fakes[f"{name} full"] = items([find(p, dec) for p in pairs], 1)
+    fakes[f"{name} local"] = []
+    for p in pairs:
+        real = np.asarray(Image.open(find(p, "real")).convert("RGB"), dtype=np.float32)
+        fake = np.asarray(Image.open(find(p, dec)).convert("RGB"), dtype=np.float32)
         mask = random_mask(*real.shape[:2], rng)
-        for kind, m in (("full", np.ones_like(mask)), ("local", mask)):
-            Image.fromarray(blend(real, fake, m)).save(p / f"test_{vae}_{kind}.png")
-            Image.fromarray((m * 255).astype(np.uint8)).save(p / f"test_{vae}_{kind}_mask.png")
-            groups[f"{vae} {kind}"].append({"path": p / f"test_{vae}_{kind}.png", "label": 1,
-                                            "mask": p / f"test_{vae}_{kind}_mask.png"})
+        Image.fromarray(blend(real, fake, mask)).save(p / f"local_{dec}.png")
+        Image.fromarray((mask * 255).astype(np.uint8)).save(p / f"local_{dec}_mask.png")
+        fakes[f"{name} local"].append({"path": p / f"local_{dec}.png", "label": 1, "mask": p / f"local_{dec}_mask.png"})
 
-# images of real generators
+# closed generators
 for gen, paths in download_fakes(data / "qwen_image_bench", d["generators"], d["n_per_generator"]).items():
-    groups[gen] = [{"path": p, "label": 1} for p in paths]
+    fakes[gen] = items(paths, 1)
 
-# score and report
-real_scores, _ = score(model, ImageDataset(reals, model.patch_size, d["max_side"]), device)
-results = {name: score(model, ImageDataset(items, model.patch_size, d["max_side"]), device) for name, items in groups.items()}
-table = report(real_scores, results)
-(out / "report.md").write_text(table, encoding="utf-8")
-print(table)
+# score under each protocol
+tables = []
+for protocol in test["protocols"]:
+    run = lambda its: score(model, ImageDataset(its, model.patch_size, protocol, d["max_side"]), device)  # noqa: E731
+    calib_scores, _ = run(calib)
+    real_scores = {name: run(its)[0] for name, its in reals.items()}
+    fake_results = {name: run(its) for name, its in fakes.items()}
+    thr = threshold_at(calib_scores, test["alpha"])
+    fpr = "\n".join(f"measured FPR, {name} ({len(s)}): {(s > thr).mean():.3f}" for name, s in real_scores.items())
+    table = report(calib_scores, np.concatenate(list(real_scores.values())), fake_results, test["alpha"])
+    tables.append(f"## protocol: {protocol}\n\n{fpr}\n\n{table}\n")
+    print(tables[-1])
+
+(out / "report.md").write_text("\n".join(tables), encoding="utf-8")

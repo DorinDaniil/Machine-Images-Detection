@@ -1,23 +1,25 @@
-# Pilot: train on COCO photos re-decoded by one VAE,
-# test on VAEs never seen in training and on images of real generators.
+# Pilot: train on real images vs their copies re-decoded by two decoder families,
+# test on decoder families never seen in training and on images of closed generators.
 
 data:
   dir: data
-  n_real: 2000              # COCO val2017 photos: 80 % train, 20 % test
+  n_real: 2000              # COCO val2017 photos: 70 % train, 15 % calibration, 15 % test
+  n_render: 400             # code-rendered text pages, UI screens, charts, logos (split the same way)
   max_side: 1024
-  train_vae: [sd15]         # Stable Diffusion 1.x VAE makes the training fakes
-  test_vae: [sdxl, flux]    # unseen VAEs for the test
+  train_decoders: [sd, flux1]                 # families kl-f8-c4 and kl-f8-c16 (see src/data/decoders.py)
+  test_decoders: [sdxl, flux2, qwen, dcae]    # sdxl: seen family (sanity check); the rest: unseen families
   generators: [gpt-image-2, nano-banana-pro, nano-banana-2.0, FLUX.2-pro, Seedream-4.5,
                Imagen-4.0, Qwen-Image, HunyuanImage-3.0, kling_v2_1]
   n_per_generator: 200      # images per model from Qwen/Qwen-Image-Bench
 
 model:
-  backbone: facebook/dinov3-vitb16-pretrain-lvd1689m   # gated; open: facebook/dinov2-with-registers-base
+  backbone: vit_base_patch16_dinov3.lvd1689m   # timm, no access request; open alternative: vit_base_patch14_reg4_dinov2.lvd142m
+  layers: [3, 7, 11]        # patch features of an early, a middle and the last block
   head_dim: 256
   topk: 0.05                # image score = mean of the top 5 % patch logits
 
 train:
-  crop: 384
+  crop: 448
   p_real: 0.3
   p_full: 0.3
   p_local: 0.4
@@ -28,3 +30,7 @@ train:
   num_workers: 8
   device: cuda
   out: runs/pilot
+
+test:
+  alpha: 0.01               # target false-positive rate, threshold from calibration reals
+  protocols: [equalized, native]
