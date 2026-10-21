@@ -16,9 +16,8 @@ pip install torch --index-url https://download.pytorch.org/whl/cu128   # GPU
 python -m pytest tests -q
 ```
 
-Weights and data download from Hugging Face without access requests. DINOv3 comes from the timm copy
-(Meta DINOv3 license: commercial use allowed, cite DINOv3 in papers). OpenFake is CC BY-NC 4.0: research use.
-Log in once on the download machine (`hf auth login`, a read token): anonymous downloads are rate-limited.
+All weights and data are on Hugging Face without access requests (DINOv3 through timm).
+OpenFake is CC BY-NC 4.0: research use.
 
 ## Pilot
 
@@ -28,11 +27,8 @@ python scripts/run_train.py --config configs/train.yaml
 python scripts/run_test.py --config configs/train.yaml
 ```
 
-- train: 100k reals (LAION, Pexels) and up to 5000 images of each of 21 popular and recent
-  generators (GPT-Image-1, DALL·E 3, Imagen 3/4, Midjourney 6, Ideogram 3, FLUX 1 and 2, SD 1.5 to
-  3.5, HiDream, Qwen-Image, ...) from the first 200 of 608 files; the generator list, the caps and
-  the number of files are in the config (`null` = everything); 15 % of the reals are kept apart for
-  calibration;
+- train: OpenFake core/train, 100k reals (LAION, Pexels) and up to 5000 images of each of 21 popular
+  and recent generators; 15 % of the reals are kept apart for calibration;
 - threshold: 1 % false positives on the calibration reals and on rendered text, UI, charts, logos;
 - test, against reals of the same source:
   - OpenFake core/test: newer generators (GPT-Image-1.5 and 2, Nano Banana Pro, Seedream 5,
@@ -43,18 +39,8 @@ python scripts/run_test.py --config configs/train.yaml
 - protocols: `equalized` (every image resized, cropped and JPEG-compressed the same way) and `native`;
 - result: `runs/pilot/report.md`.
 
-Data: `download_data.py` fetches train files (5.4 GB each) and the 13 test files whole, 8 at a time,
-keeps the original bytes of the images the limits allow and deletes each file (~45 GB of temporary
-disk). The pilot downloads ~1.1 TB and keeps ~0.25 TB; the whole set is 3.3 TB and ~3 TB on disk.
-A broken file is retried; a stopped run resumes from the finished files. Training: one GPU, under
-an hour per epoch for the pilot. Generators are very unequal in size; `max_files` sets the budget
-(estimate for all 72 generators, cap 5000, from the first file):
-
-| max_files | downloaded | generators with 5000 | with ≥ 1000 |
-|---|---|---|---|
-| 100 | 0.5 TB | 13 | 33 |
-| 200 | 1.1 TB | 21 | 47 |
-| null (all 608) | 3.3 TB | 34 | 63 |
+Downloads ~1.1 TB (the first 200 of 608 train files, each deleted once its images are taken) and keeps
+~0.25 TB; one GPU, under an hour per epoch. Generators, caps and the number of files: in the config.
 
 ## Layout
 
