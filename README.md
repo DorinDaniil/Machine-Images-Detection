@@ -16,8 +16,9 @@ pip install torch --index-url https://download.pytorch.org/whl/cu128   # GPU
 python -m pytest tests -q
 ```
 
-All weights and data are on Hugging Face without access requests (DINOv3 through timm).
-OpenFake is CC BY-NC 4.0: research use.
+Weights and data download from Hugging Face without access requests. DINOv3 comes from the timm copy
+(Meta DINOv3 license: commercial use allowed, cite DINOv3 in papers). OpenFake is CC BY-NC 4.0: research use.
+For long streams log in once (`hf auth login`, a read token): anonymous downloads are rate-limited.
 
 ## Pilot
 
@@ -26,7 +27,8 @@ python scripts/run_train.py --config configs/train.yaml
 python scripts/run_test.py --config configs/train.yaml
 ```
 
-- train: OpenFake core/train, 5000 reals (LAION, Pexels) and up to 150 images per generator;
+- train: first 400k rows of OpenFake core/train, 60k reals (LAION, Pexels) and up to 5000 images
+  per generator; `tiny-random-sana` (noise from a random-weight test model) is skipped;
   15 % of the reals are kept apart for calibration;
 - threshold: 1 % false positives on the calibration reals and on rendered text, UI, charts, logos;
 - test, against reals of the same source:
@@ -38,8 +40,16 @@ python scripts/run_test.py --config configs/train.yaml
 - protocols: `equalized` (every image resized, cropped and JPEG-compressed the same way) and `native`;
 - result: `runs/pilot/report.md`.
 
-Streams about 30 shards of 5 GB (only kept images are written, ~5 GB on disk); one GPU, a few hours.
-Fewer rows: lower `max_rows` in the config.
+Data: 8 threads stream ~570 GB of train and 68 GB of test; only kept images are written (~80 GB).
+Training: one GPU, a few hours. Generators are mixed in every train file and very unequal in size,
+so `max_rows` decides how many of them reach 5000 (estimate from the first file):
+
+| max_rows | streamed | generators with 5000 | with ≥ 1000 |
+|---|---|---|---|
+| 200k | 0.3 TB | 3 | 24 |
+| 400k | 0.6 TB | 13 | 34 |
+| 800k | 1.1 TB | 21 | 48 |
+| 2.3M (all) | 3.3 TB | 35 | 64 |
 
 ## Layout
 

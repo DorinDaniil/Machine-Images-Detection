@@ -36,9 +36,8 @@ calib = [{"path": p, "label": 0} for p in calib_files["openfake_reals"] + calib_
 renders = [{"path": p, "label": 0} for p in calib_files["renders_test"]]
 seen = {r["generator"] for r in load_rows(data / "openfake_train.csv")}
 
-of = d["test"]
-openfake_rows = openfake("test", data / "openfake_test", of["n_real"], of["n_per_model"], of["max_rows"], of["real_sources"])
-sid_rows = sid_set("validation", data / "sid_validation", d["sid"]["n_per_class"], d["sid"]["max_rows"])
+openfake_rows = openfake("test", data / "openfake_test", workers=d["workers"], **d["test"])
+sid_rows = sid_set("validation", data / "sid_validation", **d["sid"])
 
 tables = []
 for protocol in test["protocols"]:

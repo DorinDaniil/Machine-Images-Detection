@@ -69,21 +69,28 @@ def test_store_and_renders(tmp_path):
     assert len(items) == 4 and all(min(Image.open(it["path"]).size) >= 512 for it in items)
 
 
+class FakeStream(list):
+    """Stands in for a streamed Hub split of 3 files: shard k is the k-th contiguous third."""
+    n_shards = 3
+
+    def shard(self, n, k):
+        return FakeStream(self[k * len(self) // n:(k + 1) * len(self) // n])
+
+
 def test_openfake_caps(tmp_path, monkeypatch):
-    """Quotas per generator, real-source filter and caching, on a fake stream instead of the Hub."""
+    """Quotas shared by threads even when files are grouped by generator, real-source filter, skipped noise model,
+    caching; no Hub."""
     from src.data import download
 
-    def png():
-        buf = io.BytesIO()
-        Image.new("RGB", (600, 600), "white").save(buf, format="PNG")
-        return {"bytes": buf.getvalue()}
+    buf = io.BytesIO()
+    Image.new("RGB", (600, 600), "white").save(buf, format="PNG")
+    kinds = [("real", "docci"), ("real", "imagenet"), ("fake", "gen-a"), ("fake", "gen-b"), ("fake", "tiny-random-sana")]
+    stream = FakeStream({"image": {"bytes": buf.getvalue()}, "label": label, "model": model} for label, model in kinds for _ in range(9))
+    monkeypatch.setattr(download, "_stream", lambda *a, **k: stream)
 
-    stream = [{"image": png(), "label": "real", "model": "docci" if i % 2 else "imagenet"} for i in range(6)]
-    stream += [{"image": png(), "label": "fake", "model": "gen-a" if i % 3 else "gen-b"} for i in range(9)]
-    monkeypatch.setattr(download, "_stream", lambda *a, **k: iter(stream))
-
-    rows = download.openfake("test", tmp_path / "of", n_real=2, n_per_model=2, max_rows=100, real_sources=["docci"])
-    reals = [r for r in rows if r["label"] == 0]
-    assert len(reals) == 2 and all(r["source"] == "openfake/docci" for r in reals)
-    assert sorted(r["generator"] for r in rows if r["label"]) == ["gen-a", "gen-a", "gen-b", "gen-b"]
-    assert download.openfake("test", tmp_path / "of", 2, 2, 100) == load_rows(tmp_path / "of.csv")  # cached
+    for workers, out in ((1, "one"), (3, "three")):
+        rows = download.openfake("test", tmp_path / out, n_real=2, n_per_model=2, max_rows=100, real_sources=["docci"], workers=workers)
+        reals = [r for r in rows if r["label"] == 0]
+        assert len(reals) == 2 and all(r["source"] == "openfake/docci" for r in reals)
+        assert sorted(r["generator"] for r in rows if r["label"]) == ["gen-a", "gen-a", "gen-b", "gen-b"]
+    assert download.openfake("test", tmp_path / "three", 2, 2, 100) == load_rows(tmp_path / "three.csv")  # cached

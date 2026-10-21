@@ -27,7 +27,7 @@ data = Path(d["dir"])
 model = Detector(**cfg["model"])
 crop = t["crop"] // model.patch_size * model.patch_size
 
-rows = openfake("train", data / "openfake_train", d["train"]["n_real"], d["train"]["n_per_model"], d["train"]["max_rows"])
+rows = openfake("train", data / "openfake_train", workers=d["workers"], **d["train"])
 random.Random(0).shuffle(rows)
 reals, fakes = [r for r in rows if r["label"] == 0], [r for r in rows if r["label"] == 1]
 n_calib = int(0.15 * len(reals))

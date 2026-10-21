@@ -3,19 +3,20 @@
 
 data:
   dir: data
-  train:                    # OpenFake core/train, streamed; ~4000 rows per 5 GB shard
-    max_rows: 16000
-    n_real: 5000            # LAION and Pexels photos; 15 % of them are kept apart for calibration
-    n_per_model: 150        # cap per generator, so frequent models do not dominate
-  test:                     # OpenFake core/test: newer generators, DOCCI reals
-    max_rows: 30000
-    n_real: 1000
+  workers: 8                # threads streaming separate files of a split
+  train:                    # OpenFake core/train: 2.3M rows, 3.3 TB, generators mixed in every file
+    max_rows: 400000        # rows read: ~570 GB streamed, ~80 GB kept on disk
+    n_real: 60000           # LAION and Pexels photos; 15 % of them are kept apart for calibration
+    n_per_model: 5000       # cap per generator; ~13 generators reach it at 400k rows, ~35 on the whole split
+  test:                     # OpenFake core/test (68 GB, read whole): newer generators, DOCCI reals
+    max_rows: 100000
+    n_real: 5000
     real_sources: [docci]
-    n_per_model: 200
+    n_per_model: 1000
   sid:                      # SID_Set validation: local edits with masks (not used for training)
     max_rows: 6000
-    n_per_class: 500
-  n_render: 600             # rendered text / UI / charts / logos: half for calibration, half for FPR test
+    n_per_class: 1000
+  n_render: 1000            # rendered text / UI / charts / logos: half for calibration, half for FPR test
 
 model:
   backbone: vit_large_patch16_dinov3.lvd1689m   # timm, no access request; faster: vit_base_patch16_dinov3.lvd1689m
@@ -25,7 +26,7 @@ model:
 
 train:
   crop: 448
-  epochs: 8
+  epochs: 5
   batch_size: 32
   lr: 3.0e-4
   weight_decay: 0.05

@@ -1,10 +1,10 @@
 """Open datasets from Hugging Face, streamed: only the kept images are written to disk.
 
 OpenFake (ComplexDataLab/OpenFake, CC BY-NC 4.0): real photos and images of many generators, with the
-    generator name for every image. core/train: reals from LAION and Pexels; fakes from SD 1.x to FLUX.2,
-    GPT-Image-1, Imagen 4, Midjourney 6 and ~70 others. core/test: newer models (GPT-Image-1.5 and 2,
-    Nano Banana Pro, Seedream 5, Midjourney 7, FLUX.2-klein-9B, Z-Image-Turbo, ...) and other real
-    sources (DOCCI, ImageNet).
+    generator name for every image. core/train (2.3M rows, 3.3 TB, generators mixed in every file): reals
+    from LAION and Pexels; fakes from SD 1.x to FLUX.2, GPT-Image-1, Imagen 4, Midjourney 6 and ~70 others.
+    core/test (91k rows, 68 GB, grouped by generator): newer models (GPT-Image-1.5 and 2, Nano Banana Pro,
+    Seedream 5, Midjourney 7, FLUX.2-klein-9B, Z-Image-Turbo, ...) and other real sources (DOCCI, ImageNet).
 SID_Set (saberzl/SID_Set, CC BY 4.0): real (0), fully synthetic (1) and locally edited (2) images,
     with masks of the edited region.
 
@@ -16,12 +16,15 @@ information about the label.
 import csv
 import io
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Lock
 
 from PIL import Image
 from tqdm import tqdm
 
 COLUMNS = ["path", "label", "generator", "mask", "source"]
+SKIP = {"tiny-random-sana"}  # OpenFake "generator" that is a random-weight test pipeline: pure noise
 
 
 def save_rows(rows: list[dict], path) -> None:
@@ -59,32 +62,53 @@ def _stream(repo: str, config: str, split: str, columns: list[str]):
     return ds
 
 
-def openfake(split: str, out_dir, n_real: int, n_per_model: int, max_rows: int,
-             real_sources=None, max_side: int = 1024, min_side: int = 512) -> list[dict]:
+def _take(stream, out_dir: Path, prefix: str, max_rows: int, quota: dict, counts: Counter, lock, real_sources,
+          max_side: int, min_side: int, bar) -> list[dict]:
+    """One thread: reads up to max_rows rows of its files, keeps images while their quota (shared) is not full."""
+    rows = []
+    for i, row in enumerate(stream):
+        if i >= max_rows:
+            break
+        bar.update(1)
+        label, model = int(row["label"] == "fake"), row["model"]
+        if model in SKIP or (label == 0 and real_sources and model not in real_sources):
+            continue
+        key = model if label else "real"
+        with lock:
+            if counts[key] >= quota[label]:
+                continue
+            counts[key] += 1
+        path = out_dir / f"{prefix}{i:07d}.jpg"
+        if _store(row["image"]["bytes"], path, max_side, min_side):
+            rows.append({"path": str(path), "label": label, "generator": model if label else "",
+                         "mask": "", "source": "openfake" if label else f"openfake/{model}"})
+        else:
+            with lock:
+                counts[key] -= 1
+    return rows
+
+
+def openfake(split: str, out_dir, n_real: int, n_per_model: int, max_rows: int, real_sources=None,
+             workers: int = 8, max_side: int = 1024, min_side: int = 512) -> list[dict]:
     """Up to n_real reals (optionally only from real_sources) and n_per_model images of every generator,
-    from the first max_rows rows of OpenFake core/<split>. Cached in <out_dir>.csv."""
+    from the first max_rows rows of OpenFake core/<split>. `workers` threads read separate files and
+    share the quotas. Cached in <out_dir>.csv."""
     out_dir = Path(out_dir)
     cache = out_dir.with_suffix(".csv")
     if cache.exists():
         return load_rows(cache)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    rows, counts = [], Counter()
-    for i, row in enumerate(tqdm(_stream("ComplexDataLab/OpenFake", "core", split, ["image"]), total=max_rows, desc=f"OpenFake {split}")):
-        if i >= max_rows:
-            break
-        label, model = int(row["label"] == "fake"), row["model"]
-        if label == 0 and (counts["real"] >= n_real or (real_sources and model not in real_sources)):
-            continue
-        if label == 1 and counts[model] >= n_per_model:
-            continue
-        path = out_dir / f"{i:07d}.jpg"
-        if _store(row["image"]["bytes"], path, max_side, min_side):
-            counts["real" if label == 0 else model] += 1
-            rows.append({"path": str(path), "label": label, "generator": "" if label == 0 else model,
-                         "mask": "", "source": f"openfake/{model}" if label == 0 else "openfake"})
+    stream = _stream("ComplexDataLab/OpenFake", "core", split, ["image"])
+    n = min(workers, stream.n_shards) if workers > 1 else 1
+    parts = [stream.shard(n, k) for k in range(n)] if n > 1 else [stream]
+    quota, counts, lock = {0: n_real, 1: n_per_model}, Counter(), Lock()
+    with tqdm(total=max_rows, desc=f"OpenFake {split}") as bar, ThreadPoolExecutor(n) as pool:
+        jobs = [pool.submit(_take, parts[k], out_dir, f"{k:02d}_", max_rows // n + (k < max_rows % n), quota, counts,
+                            lock, real_sources, max_side, min_side, bar) for k in range(n)]
+        rows = [r for job in jobs for r in job.result()]
     save_rows(rows, cache)
-    print(f"OpenFake {split}: {counts['real']} reals, {len(rows) - counts['real']} fakes from {len(counts) - 1} generators")
+    print(f"OpenFake {split}: {counts['real']} reals, {len(rows) - counts['real']} fakes from {len(counts) - ('real' in counts)} generators")
     return rows
 
 
