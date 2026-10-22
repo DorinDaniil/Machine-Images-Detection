@@ -30,7 +30,9 @@ python scripts/run_test.py --config configs/train.yaml
 
 - train: the whole of OpenFake core/train, 300k reals (LAION, Pexels) and up to 10k images of each
   of 36 generators: API models, open flagships, the most used community fine-tunes, frames of video
-  models (list in the config); 15 % of the reals are kept apart for calibration;
+  models (list in the config); 15 % of the reals are kept apart for calibration; every row of the
+  data CSV keeps the OpenFake prompt, prompt kind and row id, so real / fake pairs with the same
+  caption can be formed;
 - training log: accuracy, precision, recall, F1 and FPR of every epoch (train and validation) in
   `runs/pilot/metrics.csv`; `best.pt` is the epoch with the best validation F1;
 - threshold: 1 % false positives on the calibration reals and on rendered text, UI, charts, logos;

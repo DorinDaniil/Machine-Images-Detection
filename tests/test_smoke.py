@@ -1,6 +1,8 @@
 """CPU check of the whole chain on synthetic images, no downloads. python -m pytest tests -q"""
 
 import io
+import json
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -89,16 +91,23 @@ class FakeHub:
         buf = io.BytesIO()
         Image.new("RGB", (600, 600), "white").save(buf, format="PNG")
         kinds = [("real", "docci"), ("real", "imagenet"), ("fake", "gen-a"), ("fake", "gen-b"), ("fake", "tiny-random-sana")]
-        self.rows = [{"image": {"bytes": buf.getvalue()}, "label": label, "model": model} for label, model in kinds for _ in range(9)]
+        self.rows = [{"image": {"bytes": buf.getvalue()}, "label": label, "model": model, "prompt": f"prompt {i}",
+                      "prompt_kind": "qwen_caption", "row_id": f"row-{i}"} for i, (label, model) in enumerate(k for k in kinds for _ in range(9))]
         self.fail, self.opened = {}, []
 
     def files(self, repo, prefix):
         return ["f0", "f1", "f2"]
 
+    def part(self, name):
+        k = int(name[1])
+        return self.rows[k * len(self.rows) // 3:(k + 1) * len(self.rows) // 3]
+
+    def columns(self, repo, name, columns):
+        return [{c: r[c] for c in columns} for r in self.part(name)]
+
     def read(self, repo, name, tmp_dir, columns):
         self.opened.append(name)
-        k = int(name[1])
-        part = self.rows[k * len(self.rows) // 3:(k + 1) * len(self.rows) // 3]
+        part = self.part(name)
         if self.fail.get(name, 0) > 0:
             self.fail[name] -= 1
             return broken(part)
@@ -116,6 +125,7 @@ def fake_hub(monkeypatch):
     hub = FakeHub()
     monkeypatch.setattr(download, "_files", hub.files)
     monkeypatch.setattr(download, "_rows", hub.read)
+    monkeypatch.setattr(download, "_columns", hub.columns)
     monkeypatch.setattr(download, "ATTEMPTS", 3)
     monkeypatch.setattr(download, "RETRY_WAIT", 0)
     return download, hub
@@ -136,6 +146,19 @@ def test_openfake_resume(tmp_path, monkeypatch):
     assert hub.opened == ["f2", "f2"]
     assert sum(r["label"] == 0 for r in rows) == 2
     assert sorted(r["generator"] for r in rows if r["label"]) == ["gen-a", "gen-a", "gen-b", "gen-b"]
+    assert all(r["prompt"] == f"prompt {int(Path(r['path']).stem.split('_')[1]) + 15 * int(Path(r['path']).stem[:4])}" for r in rows)
+
+    # files finished before prompts were kept: the next run fills them in from the text columns only
+    for p in (tmp_path / "of" / "done").glob("*.json"):
+        part = json.loads(p.read_text())
+        for r in part["rows"]:
+            for k in ("prompt", "prompt_kind", "row_id"):
+                r.pop(k)
+        p.write_text(json.dumps(part))
+    (tmp_path / "of.csv").unlink()
+    hub.opened = []
+    again = download.openfake("test", tmp_path / "of", n_real=2, n_per_model=2, workers=3)
+    assert hub.opened == [] and again == rows and all(r["row_id"].startswith("row-") for r in again)
 
 
 def test_openfake_caps(tmp_path, monkeypatch):
