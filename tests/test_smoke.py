@@ -39,6 +39,9 @@ def test_pipeline(tmp_path):
 
     weights = balanced_weights(rows)
     assert abs(sum(weights) - 1.0) < 1e-6  # half reals, half fakes spread over generators
+    small = [{"generator": g} for g in ["a"] * 4 + ["b"]]  # floor 2: b weighs like a 2-image generator
+    w = balanced_weights(small, floor=2)
+    assert abs(sum(w) - 0.5) < 1e-9 and abs(w[0] - 1 / 12) < 1e-9 and abs(w[4] - 1 / 6) < 1e-9
 
     model = Detector("tiny", layers=(0, 1), head_dim=16, topk=0.1)
     item = TrainDataset(rows, crop=160)[1]

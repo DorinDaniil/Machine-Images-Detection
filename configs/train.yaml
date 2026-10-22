@@ -1,24 +1,30 @@
 # Real images vs images of many open and API generators (OpenFake), frozen DINOv3 + patch head.
 # Test on newer generators, other real sources, local edits and non-photo reals.
-# Pilot: ~100k reals and ~100k fakes of 21 popular and recent generators, ~1 TB downloaded, ~0.25 TB on disk.
+# Pilot: 300k reals and up to 10k images of each of 36 generators from the whole of OpenFake train:
+# 3.3 TB downloaded, ~0.6 TB kept on disk.
 
 data:
   dir: data
-  workers: 8                # OpenFake files downloaded at once, ~5.4 GB of temporary disk each
+  workers: 4                # OpenFake files downloaded at once, ~5.4 GB of temporary disk each
   train:                    # OpenFake core/train: 608 files of ~3800 rows; images kept as original bytes
-    n_real: 100000          # LAION and Pexels photos; 15 % are kept apart for calibration. null: all (~590k usable)
-    n_per_model: 5000       # cap per generator; smaller generators give all they have. null: no cap
-    generators:             # null: all 72. Listed: API models and open flagships; the rest (community
-      - gpt-image-1         #   fine-tunes, anime, video frames) stays out of this pilot
-      - dalle-3
+    n_real: 300000          # LAION and Pexels photos; 15 % are kept apart for calibration. null: all (~590k usable)
+    n_per_model: 10000      # cap per generator; smaller generators give all they have. null: no cap
+    generators:             # null: all 72. 36 listed: API models, open flagships, the most used community
+      # API
+      - gpt-image-1         #   fine-tunes, frames of video models. Left out: duplicates of the same model under
+      - dalle-3             #   other names, anime / illustration models (no real drawings to match them)
       - imagen-3.0-002
       - imagen-4.0
       - midjourney-6
       - ideogram-3.0
       - flux-1.1-pro
       - grok-2-image-1212
+      - grok-imagine
       - seedream-v4.0
+      - seedream-v4.5
       - nano-banana-2
+      - mystic
+      # open flagships
       - sd-1.5
       - sd-2.1
       - sdxl
@@ -30,8 +36,22 @@ data:
       - hidream-i1-full
       - qwen-image
       - chroma
-    max_files: 200          # ~1.1 TB downloaded; enough for 5000 of every generator above with >15k images.
-                            #   Rare ones (nano-banana-2, seedream, grok) give what these files hold. null: all 608
+      - playground-v2.5-1024px-aesthetic
+      # community fine-tunes (Civitai): photorealism, amateur-photo look
+      - sdxl-juggernaut
+      - sdxl-realvis-v5
+      - sdxl-epic-realism
+      - sd-1.5-dreamshaper
+      - realistic_vision_v5.1_novae
+      - flux-amateursnapshotphotos
+      - amateur-photography-v6
+      # frames of video models
+      - wan-video-2.2
+      - wan-video-2.1
+      - hunyuan-video
+      - ltxv-2.3
+    max_files: null         # null: all 608 files (3.3 TB); 200 files (1.1 TB) still fill 5000 for the frequent
+                            #   generators but give only a third of the rare ones (nano-banana-2, seedream, video)
   test:                     # OpenFake core/test: 13 files, 68 GB; newer generators, DOCCI reals
     n_real: 5000
     real_sources: [docci]
@@ -49,6 +69,7 @@ model:
 train:
   crop: 448
   epochs: 5
+  balance_floor: 5000       # a generator with fewer images weighs in proportion to its size, the rest equally
   batch_size: 32
   lr: 3.0e-4
   weight_decay: 0.05

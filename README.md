@@ -5,8 +5,9 @@ patch; the image score is the mean of the top 5 % patches, so a small edited reg
 
 Training data is simply real images and images of many generators (OpenFake: SD 1.x to FLUX.2,
 GPT-Image-1, Imagen 4, Midjourney 6 and ~70 others). Batches are balanced: half reals, half fakes
-spread evenly over generators. Images are stored as untouched originals; every training image is
-JPEG-compressed at a random quality, so the file format cannot give the answer.
+spread over generators (equally, small generators in proportion to their size). Images are stored as
+untouched originals; every training image is JPEG-compressed at a random quality, so the file format
+cannot give the answer.
 
 ## Setup
 
@@ -27,8 +28,9 @@ python scripts/run_train.py --config configs/train.yaml
 python scripts/run_test.py --config configs/train.yaml
 ```
 
-- train: OpenFake core/train, 100k reals (LAION, Pexels) and up to 5000 images of each of 21 popular
-  and recent generators; 15 % of the reals are kept apart for calibration;
+- train: the whole of OpenFake core/train, 300k reals (LAION, Pexels) and up to 10k images of each
+  of 36 generators: API models, open flagships, the most used community fine-tunes, frames of video
+  models (list in the config); 15 % of the reals are kept apart for calibration;
 - training log: accuracy, precision, recall, F1 and FPR of every epoch (train and validation) in
   `runs/pilot/metrics.csv`; `best.pt` is the epoch with the best validation F1;
 - threshold: 1 % false positives on the calibration reals and on rendered text, UI, charts, logos;
@@ -41,8 +43,8 @@ python scripts/run_test.py --config configs/train.yaml
 - protocols: `equalized` (every image resized, cropped and JPEG-compressed the same way) and `native`;
 - result: `runs/pilot/report.md`.
 
-Downloads ~1.1 TB (the first 200 of 608 train files, each deleted once its images are taken) and keeps
-~0.25 TB; one GPU, under an hour per epoch. Generators, caps and the number of files: in the config.
+Downloads 3.3 TB (608 train files, each deleted once its images are taken) and keeps ~0.6 TB; one GPU,
+about an hour per epoch. Generators, caps and the number of files (`max_files`): in the config.
 
 ## Layout
 

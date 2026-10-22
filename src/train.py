@@ -51,11 +51,15 @@ def validate(model: Detector, loader: DataLoader, device: str, threshold: float)
     return {"loss": loss_sum / max(n, 1), **metrics.summary()}
 
 
-def balanced_weights(rows: list[dict]) -> list[float]:
-    """Sampling weights: half of the draws are reals, the other half spread evenly over generators."""
+def balanced_weights(rows: list[dict], floor: int = 5000) -> list[float]:
+    """Sampling weights: half of the draws are reals, the other half is spread over generators equally,
+    except that a generator with fewer than `floor` images weighs in proportion to its size. So no image
+    is drawn more often than an image of a generator with `floor` images."""
     counts = Counter(r["generator"] for r in rows)
-    n_gen = len([g for g in counts if g])
-    return [0.5 / counts[""] if not r["generator"] else 0.5 / (n_gen * counts[r["generator"]]) for r in rows]
+    mass = {g: min(n, floor) for g, n in counts.items() if g}
+    total = sum(mass.values())
+    return [0.5 / counts[""] if not r["generator"] else 0.5 * mass[r["generator"]] / (total * counts[r["generator"]])
+            for r in rows]
 
 
 def fmt(stats: dict) -> str:
@@ -69,7 +73,8 @@ def train(model: Detector, train_set, val_set, cfg: dict) -> Path:
     threshold = cfg.get("threshold", 0.5)
     out = Path(cfg["out"])
     out.mkdir(parents=True, exist_ok=True)
-    sampler = WeightedRandomSampler(balanced_weights(train_set.rows), num_samples=len(train_set), replacement=True)
+    weights = balanced_weights(train_set.rows, cfg.get("balance_floor", 5000))
+    sampler = WeightedRandomSampler(weights, num_samples=len(train_set), replacement=True)
     loader = DataLoader(train_set, batch_size=cfg["batch_size"], sampler=sampler, drop_last=True,
                         num_workers=cfg["num_workers"], pin_memory=device == "cuda")
     val_loader = DataLoader(val_set, batch_size=cfg["batch_size"], num_workers=cfg["num_workers"])
