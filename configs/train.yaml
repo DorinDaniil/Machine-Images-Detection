@@ -83,6 +83,7 @@ train:
   batch_size: 32            # images per optimizer step, as before; sizes differ, so they go through the model one
                             #   by one and the gradient of 32 images is accumulated
   val_size: 5000            # images held out for validation; best.pt = epoch with the lowest validation loss
+  save_every: 1000          # optimizer steps between saves of the training state (~20 min); --resume goes on from it
   lr: 3.0e-4
   weight_decay: 0.05
   num_workers: 8

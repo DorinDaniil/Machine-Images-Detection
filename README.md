@@ -25,7 +25,7 @@ OpenFake is CC BY-NC 4.0: research use.
 
 ```bash
 python scripts/download_data.py --config configs/train.yaml   # once; stop and rerun any time
-python scripts/run_train.py --config configs/train.yaml
+python scripts/run_train.py --config configs/train.yaml            # after a crash: add --resume
 python scripts/run_test.py --config configs/train.yaml
 ```
 

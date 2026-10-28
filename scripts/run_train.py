@@ -1,8 +1,9 @@
-"""python scripts/run_train.py --config configs/train.yaml
+"""python scripts/run_train.py --config configs/train.yaml [--resume]
 
 OpenFake core/train (reals + generators) and SID_Set train (reals, fully synthetic and locally edited images
 with masks) -> 15 % of the reals kept apart for calibration -> generator-balanced training of the patch head
 on a frozen DINOv3, whole images with augmentations -> runs/pilot/best.pt
+--resume: go on from runs/pilot/state.pt after a crash or Ctrl+C (saved every save_every steps and every epoch)
 """
 
 import argparse
@@ -21,7 +22,9 @@ from src.train import train  # noqa: E402
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--config", default="configs/train.yaml")
-cfg = yaml.safe_load(open(parser.parse_args().config))
+parser.add_argument("--resume", action="store_true", help="go on from <out>/state.pt")
+args = parser.parse_args()
+cfg = yaml.safe_load(open(args.config))
 d, t = cfg["data"], cfg["train"]
 data, out = Path(d["dir"]), Path(t["out"])
 out.mkdir(parents=True, exist_ok=True)
@@ -52,5 +55,5 @@ print(f"train {len(train_set)} images ({len(reals)} reals, {len(generators)} gen
       f"val {len(val_set)}, calibration {len(calib)} reals; whole images, crop {augment['crop_p']:.0%}, "
       f"downscale {augment['down_p']:.0%}")
 
-best = train(model, train_set, val_set, t)
+best = train(model, train_set, val_set, t, resume=args.resume)
 print(f"best checkpoint: {best}")

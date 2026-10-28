@@ -76,6 +76,41 @@ def test_pipeline(tmp_path):
         assert "| edit |" in report(thr, {"reals": real_scores[2:]}, [("edit", real_scores, fake_scores, f1)])
 
 
+class Crash(TrainDataset):
+    """Fails on its `at`-th image read, like a crash in the middle of an epoch."""
+
+    def __init__(self, rows, at, **kwargs):
+        super().__init__(rows, **kwargs)
+        self.at, self.reads = at, 0
+
+    def __getitem__(self, i):
+        self.reads += 1
+        if self.reads == self.at:
+            raise RuntimeError("power cut")
+        return super().__getitem__(i)
+
+
+def test_train_resume(tmp_path):
+    """A crash in the middle of epoch 2; resume goes on from the last saved state: no step lost or repeated."""
+    rows = make_rows(tmp_path)
+    cfg = dict(device="cpu", out=str(tmp_path / "run"), batch_size=2, num_workers=0, lr=1e-3, weight_decay=0.0,
+               epochs=2, samples_per_epoch=8, save_every=1)
+    val = TrainDataset(rows[:4], seed=1, crop_p=0, down_p=0)
+    with pytest.raises(RuntimeError, match="power cut"):
+        train(Detector("tiny", layers=(0, 1), head_dim=16), Crash(rows[2:], at=13), val, cfg)  # 8 images, then the 5th
+    state = torch.load(tmp_path / "run" / "state.pt", weights_only=False)
+    assert state["epoch"] == 2 and state["progress"]["n"] == 4 and len(state["log"]) == 1
+    assert state["scheduler"]["last_epoch"] == 6  # 4 steps of epoch 1, 2 of epoch 2
+
+    resumed = Detector("tiny", layers=(0, 1), head_dim=16)  # as a new process: weights come from the state
+    train(resumed, TrainDataset(rows[2:]), val, cfg, resume=True)
+    state = torch.load(tmp_path / "run" / "state.pt", weights_only=False)
+    assert state["epoch"] == 3 and state["progress"] is None and state["scheduler"]["last_epoch"] == 8
+    epochs = [line.split(",")[0] for line in (tmp_path / "run" / "metrics.csv").read_text().splitlines()[1:]]
+    assert epochs == ["1", "2"]
+    assert all(torch.equal(a, b) for a, b in zip(resumed.head.state_dict().values(), state["head"].values()))
+
+
 def test_train_views(tmp_path):
     """Whole images at their own size; the memory cut, the crop and the downscale stay in their ranges;
     targets follow the label; nothing is ever enlarged."""

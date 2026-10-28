@@ -66,22 +66,23 @@ def fmt(stats: dict) -> str:
     return " ".join(f"{k} {v:.4f}" for k, v in stats.items())
 
 
-def train(model: Detector, train_set, val_set, cfg: dict) -> Path:
+def train(model: Detector, train_set, val_set, cfg: dict, resume: bool = False) -> Path:
     """cfg = the `train` block of configs/train.yaml. Images differ in size, so they go through the model one
     at a time and the gradient of `batch_size` images is accumulated before each optimizer step (a remainder
     smaller than `batch_size` at the end of an epoch is dropped). An epoch is `samples_per_epoch` balanced draws
     (default: the size of the train set). Metrics of every epoch go to <out>/metrics.csv; best.pt is the epoch
     with the lowest validation loss: it does not depend on a threshold, and the test sets its own one.
+
+    Every `save_every` optimizer steps and at the end of every epoch the whole training state (head, optimizer,
+    schedule, progress in the epoch, metrics so far) goes to <out>/state.pt. With resume=True training goes on
+    from it: the rest of the interrupted epoch is drawn anew from the same balanced sampler.
     Returns the path of best.pt."""
     device = cfg["device"] if torch.cuda.is_available() else "cpu"
-    threshold, accum = cfg.get("threshold", 0.5), cfg["batch_size"]
+    threshold, accum, save_every = cfg.get("threshold", 0.5), cfg["batch_size"], cfg.get("save_every", 1000)
     samples = cfg.get("samples_per_epoch") or len(train_set)
     out = Path(cfg["out"])
     out.mkdir(parents=True, exist_ok=True)
     weights = balanced_weights(train_set.rows, cfg.get("balance_floor", 5000))
-    sampler = WeightedRandomSampler(weights, num_samples=samples, replacement=True)
-    loader = DataLoader(train_set, batch_size=1, sampler=sampler, num_workers=cfg["num_workers"],
-                        pin_memory=device == "cuda")
     val_loader = DataLoader(val_set, batch_size=1, num_workers=cfg["num_workers"])
 
     model.to(device)
@@ -92,11 +93,34 @@ def train(model: Detector, train_set, val_set, cfg: dict) -> Path:
     schedule = lambda step: min(1.0, (step + 1) / warmup) * 0.5 * (1 + math.cos(math.pi * step / total))  # noqa: E731
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, schedule)
 
-    best, best_epoch, log = math.inf, 0, []
-    for epoch in range(1, cfg["epochs"] + 1):
+    state_path = out / "state.pt"
+    best, best_epoch, log, start, progress = math.inf, 0, [], 1, None
+    if resume and state_path.exists():
+        state = torch.load(state_path, map_location="cpu", weights_only=False)
+        model.head.load_state_dict(state["head"])
+        optimizer.load_state_dict(state["optimizer"])
+        scheduler.load_state_dict(state["scheduler"])
+        best, best_epoch, log, start, progress = (state[k] for k in ("best", "best_epoch", "log", "epoch", "progress"))
+        print(f"resuming from {state_path}: epoch {start}, {progress['n'] if progress else 0} of {samples} images done")
+    elif state_path.exists():
+        print(f"{state_path} exists but resume is off: training starts from scratch and will overwrite it")
+
+    def save_state(epoch: int, progress) -> None:
+        tmp = out / "state.tmp"
+        torch.save({"head": model.head.state_dict(), "optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(),
+                    "best": best, "best_epoch": best_epoch, "log": log, "epoch": epoch, "progress": progress}, tmp)
+        tmp.replace(state_path)  # a crash while saving leaves the previous state whole
+
+    for epoch in range(start, cfg["epochs"] + 1):
         model.train()
         train_set.epoch = epoch
-        metrics, loss_sum, n, step = BinaryMetrics(threshold), 0.0, 0, 0
+        p = progress or {"n": 0, "step": 0, "loss_sum": 0.0, "counts": [0, 0, 0, 0]}
+        progress = None
+        metrics, loss_sum, n, step = BinaryMetrics(threshold), p["loss_sum"], p["n"], p["step"]
+        metrics.tp, metrics.fp, metrics.fn, metrics.tn = p["counts"]
+        left = samples - n
+        loader = DataLoader(train_set, batch_size=1, num_workers=cfg["num_workers"], pin_memory=device == "cuda",
+                            sampler=WeightedRandomSampler(weights, num_samples=left, replacement=True)) if left > 0 else []
         optimizer.zero_grad()
         for batch in loader:
             image, target = batch["image"].to(device), batch["target"].to(device)
@@ -114,6 +138,9 @@ def train(model: Detector, train_set, val_set, cfg: dict) -> Path:
                 step += 1
                 if step % 50 == 0:
                     print(f"epoch {epoch} step {step}/{steps} mean loss {loss_sum / n:.4f}")
+                if step % save_every == 0:
+                    save_state(epoch, {"n": n, "step": step, "loss_sum": loss_sum,
+                                       "counts": [metrics.tp, metrics.fp, metrics.fn, metrics.tn]})
 
         train_stats = {"loss": loss_sum / max(n, 1), **metrics.summary()}
         val_stats = validate(model, val_loader, device, threshold)
@@ -128,5 +155,6 @@ def train(model: Detector, train_set, val_set, cfg: dict) -> Path:
         if val_stats["loss"] <= best:
             best, best_epoch = val_stats["loss"], epoch
             model.save(out / "best.pt")
+        save_state(epoch + 1, None)  # this epoch is done
     print(f"best.pt: epoch {best_epoch}, validation loss {best:.4f}")
     return out / "best.pt"
