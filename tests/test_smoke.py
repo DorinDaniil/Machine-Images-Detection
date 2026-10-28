@@ -47,9 +47,13 @@ def test_pipeline(tmp_path):
     assert abs(sum(w) - 0.5) < 1e-9 and abs(w[0] - 1 / 12) < 1e-9 and abs(w[4] - 1 / 6) < 1e-9
 
     model = Detector("tiny", layers=(0, 1), head_dim=16, topk=0.1)
-    item = TrainDataset(rows, max_side=160)[1]
+    item = TrainDataset(rows, max_side=160, crop_p=0)[1]
     assert item["image"].shape == (3, 160, 160) and 0 < item["target"].mean() < 1  # masked image: partial target
-    assert TrainDataset(rows, max_side=1024)[0]["image"].shape == (3, 192, 192)  # own size, cut to the patch grid
+    assert TrainDataset(rows, crop_p=0)[0]["image"].shape == (3, 192, 192)  # whole image, cut to the patch grid
+    Image.new("RGB", (900, 600), "gray").save(tmp_path / "big.png")
+    big = TrainDataset([{"path": str(tmp_path / "big.png"), "label": 0}], crop_p=1)
+    views = {tuple(big[0]["image"].shape[1:]) for big.epoch in range(20)}  # crop augmentation: a random part
+    assert len(views) > 5 and all(256 <= h <= 592 and 352 <= w <= 896 for h, w in views)
 
     patch_logits, image_logit = model(item["image"][None])
     assert patch_logits.shape == (1, 1, 10, 10) and image_logit.shape == (1,)
@@ -59,12 +63,13 @@ def test_pipeline(tmp_path):
     m.update(torch.tensor([2.0, -2.0, 2.0, -2.0]), torch.tensor([1.0, 0.0, 0.0, 1.0]))
     assert m.summary() == {"acc": 0.5, "prec": 0.5, "rec": 0.5, "f1": 0.5, "fpr": 0.5}
 
-    shapes = {tuple(TrainDataset(rows)[i]["image"].shape[1:]) for i in range(2, 8)}
+    shapes = {tuple(TrainDataset(rows, crop_p=0)[i]["image"].shape[1:]) for i in range(2, 8)}
     assert len(shapes) == 6 and all(side % 16 == 0 for shape in shapes for side in shape)  # own sizes, on the patch grid
     cfg = dict(device="cpu", out=str(tmp_path / "run"), batch_size=2, num_workers=0, lr=1e-3, weight_decay=0.0, epochs=1)
     best = train(model, TrainDataset(rows[2:]), TrainDataset(rows[:4], seed=1), cfg)  # images of different sizes
-    fixed = dict(cfg, max_side=160, out=str(tmp_path / "fixed"))  # every crop 160 x 160: images batched as usual
-    assert train(Detector("tiny", layers=(0, 1), head_dim=16), TrainDataset(rows[2:], 160), TrainDataset(rows[:4], 160, seed=1), fixed).exists()
+    fixed = dict(cfg, max_side=160, crop_p=0, out=str(tmp_path / "fixed"))  # every view 160 x 160: batched as usual
+    assert train(Detector("tiny", layers=(0, 1), head_dim=16), TrainDataset(rows[2:], 160, crop_p=0),
+                 TrainDataset(rows[:4], 160, seed=1, crop_p=0), fixed).exists()
     assert "val_f1" in (tmp_path / "run" / "metrics.csv").read_text()
     model = Detector.load(best)
 

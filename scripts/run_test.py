@@ -42,7 +42,7 @@ sid_rows = sid_set("validation", data / "sid_validation", **d["sid"])
 tables = []
 for protocol in test["protocols"]:
     def run(rows):
-        return score(model, ImageDataset(rows, model.patch_size, protocol), device)
+        return score(model, ImageDataset(rows, model.patch_size, protocol, max_side=t["max_side"]), device)
 
     thr = threshold_at(run(calib)[0], test["alpha"])
     docci, _ = run([r for r in openfake_rows if r["label"] == 0])

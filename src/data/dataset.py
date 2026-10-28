@@ -42,14 +42,16 @@ def to_tensor(image) -> torch.Tensor:
 class TrainDataset(Dataset):
     """rows: dicts with "path", "label" (0 real, 1 generated) and "mask" (path or empty).
 
-    View: the image at its own resolution, never resized. A side longer than max_side is cut to max_side by a
-    random crop, and both sides are cut to the patch grid; then a random flip and degradations.
+    View: the whole image at its own resolution, never resized. Augmentation: with probability crop_p a random
+    part of it (each side 40-100 %, at least 256 px); a random flip; degradations. Two limits that are not
+    augmentation: a side above max_side is cut to max_side (memory; only large photos reach it) and both sides
+    are cut to the patch grid (at most patch - 1 px).
     Target map: the mask if the image has one (only that region is generated), else the label everywhere.
     Sizes differ from image to image, so the loader gives one image at a time (see train.py).
     """
 
-    def __init__(self, rows: list[dict], max_side: int = 1024, patch: int = 16, seed: int = 0):
-        self.rows, self.max_side, self.patch, self.seed, self.epoch = rows, max_side, patch, seed, 0
+    def __init__(self, rows: list[dict], max_side: int = 1536, patch: int = 16, seed: int = 0, crop_p: float = 0.5):
+        self.rows, self.max_side, self.patch, self.seed, self.crop_p, self.epoch = rows, max_side, patch, seed, crop_p, 0
 
     def __len__(self):
         return len(self.rows)
@@ -65,8 +67,11 @@ class TrainDataset(Dataset):
         else:
             target = Image.new("L", image.size, 255 * int(row["label"]))
 
-        w = min(image.width, self.max_side) // self.patch * self.patch
-        h = min(image.height, self.max_side) // self.patch * self.patch
+        w, h = min(image.width, self.max_side), min(image.height, self.max_side)
+        if rng.random() < self.crop_p:  # augmentation: a random part of the image
+            w = int(rng.uniform(min(w, max(256, 0.4 * w)), w + 1))
+            h = int(rng.uniform(min(h, max(256, 0.4 * h)), h + 1))
+        w, h = w // self.patch * self.patch, h // self.patch * self.patch
         x, y = int(rng.integers(0, image.width - w + 1)), int(rng.integers(0, image.height - h + 1))
         box = (x, y, x + w, y + h)
         image, target = image.crop(box), target.crop(box)
@@ -88,7 +93,7 @@ class ImageDataset(Dataset):
     traces (a PNG fake) would be outside what the model has seen.
     """
 
-    def __init__(self, items: list[dict], patch: int, protocol: str = "native", max_side: int = 1024, size: int = 512):
+    def __init__(self, items: list[dict], patch: int, protocol: str = "native", max_side: int = 1536, size: int = 512):
         self.items, self.patch, self.protocol, self.max_side, self.size = items, patch, protocol, max_side, size
 
     def __len__(self):

@@ -68,14 +68,15 @@ def fmt(stats: dict) -> str:
 
 def train(model: Detector, train_set, val_set, cfg: dict) -> Path:
     """cfg = the `train` block of configs/train.yaml. An optimizer step uses `batch_size` images. If max_side
-    is at most the smallest image side (512: smaller images are skipped at download), every crop has the same
-    size and images are batched as usual; otherwise sizes differ, images go through the model one at a time
-    and the gradient is accumulated. An epoch is `samples_per_epoch` balanced draws (default: the size of the
+    is at most the smallest image side (512: smaller images are skipped at download) and there is no crop
+    augmentation, every view has the same size and images are batched as usual; otherwise sizes differ,
+    images go through the model one at a time and the gradient is accumulated. An epoch is `samples_per_epoch` balanced draws (default: the size of the
     train set). Metrics of every epoch go to <out>/metrics.csv; the checkpoint with the best validation F1 is
     kept as best.pt. Returns its path."""
     device = cfg["device"] if torch.cuda.is_available() else "cpu"
     threshold, accum = cfg.get("threshold", 0.5), cfg["batch_size"]
-    per_batch = accum if cfg.get("max_side", 1024) <= cfg.get("min_side", 512) else 1
+    fixed = cfg.get("crop_p", 0.5) == 0 and cfg.get("max_side", 1536) <= cfg.get("min_side", 512)
+    per_batch = accum if fixed else 1  # one image at a time unless every view has the same size
     samples = cfg.get("samples_per_epoch") or len(train_set)
     out = Path(cfg["out"])
     out.mkdir(parents=True, exist_ok=True)

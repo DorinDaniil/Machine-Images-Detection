@@ -39,11 +39,11 @@ json.dump({"openfake_reals": [r["path"] for r in calib], "renders": renders[: le
 pool = reals + fakes
 random.Random(1).shuffle(pool)
 n_val = min(t.get("val_size", 5000), max(2, len(pool) // 20))
-train_set = TrainDataset(pool[n_val:], t["max_side"], model.patch_size, seed=0)
-val_set = TrainDataset(pool[:n_val], t["max_side"], model.patch_size, seed=1)
+train_set = TrainDataset(pool[n_val:], t["max_side"], model.patch_size, seed=0, crop_p=t.get("crop_p", 0.5))
+val_set = TrainDataset(pool[:n_val], t["max_side"], model.patch_size, seed=1, crop_p=0)  # whole images
 generators = sorted({r["generator"] for r in fakes})
 print(f"train {len(train_set)} images ({len(reals)} reals, {len(generators)} generators), val {len(val_set)}, "
-      f"own resolution up to {t['max_side']} px a side")
+      f"whole images at their own resolution, random crop on {t.get('crop_p', 0.5):.0%} of them")
 
 best = train(model, train_set, val_set, t)
 print(f"best checkpoint: {best}")
