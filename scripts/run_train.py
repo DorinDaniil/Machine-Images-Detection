@@ -25,7 +25,6 @@ d, t = cfg["data"], cfg["train"]
 data = Path(d["dir"])
 
 model = Detector(**cfg["model"])
-crop = t["crop"] // model.patch_size * model.patch_size
 
 rows = openfake("train", data / "openfake_train", workers=d["workers"], **d["train"])
 random.Random(0).shuffle(rows)
@@ -39,10 +38,12 @@ json.dump({"openfake_reals": [r["path"] for r in calib], "renders": renders[: le
 
 pool = reals + fakes
 random.Random(1).shuffle(pool)
-n_val = max(2, len(pool) // 20)
-train_set, val_set = TrainDataset(pool[n_val:], crop, seed=0), TrainDataset(pool[:n_val], crop, seed=1)
+n_val = min(t.get("val_size", 5000), max(2, len(pool) // 20))
+train_set = TrainDataset(pool[n_val:], t["max_side"], model.patch_size, seed=0)
+val_set = TrainDataset(pool[:n_val], t["max_side"], model.patch_size, seed=1)
 generators = sorted({r["generator"] for r in fakes})
-print(f"train {len(train_set)} images ({len(reals)} reals, {len(generators)} generators), val {len(val_set)}, crop {crop}")
+print(f"train {len(train_set)} images ({len(reals)} reals, {len(generators)} generators), val {len(val_set)}, "
+      f"own resolution up to {t['max_side']} px a side")
 
 best = train(model, train_set, val_set, t)
 print(f"best checkpoint: {best}")

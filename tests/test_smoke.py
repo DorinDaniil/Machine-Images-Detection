@@ -25,7 +25,8 @@ def make_rows(root, n=8, size=200):
         label = i % 2
         noise = rng.integers(0, 255, (8 if label else 32, 8 if label else 32, 3), dtype=np.uint8)
         path = root / f"{i}.jpg"
-        Image.fromarray(noise).resize((size, size), Image.BICUBIC).save(path, quality=95)
+        w, h = (size, size) if i < 2 else (size + 24 * (i % 3), size - 16 * (i % 2))  # sizes differ, as in OpenFake
+        Image.fromarray(noise).resize((w, h), Image.BICUBIC).save(path, quality=95)
         rows.append({"path": str(path), "label": label, "generator": f"gen{i % 4 // 2}" if label else "", "mask": "", "source": "toy"})
     mask = np.zeros((size, size), np.uint8)
     mask[50:120, 60:150] = 255
@@ -46,8 +47,9 @@ def test_pipeline(tmp_path):
     assert abs(sum(w) - 0.5) < 1e-9 and abs(w[0] - 1 / 12) < 1e-9 and abs(w[4] - 1 / 6) < 1e-9
 
     model = Detector("tiny", layers=(0, 1), head_dim=16, topk=0.1)
-    item = TrainDataset(rows, crop=160)[1]
+    item = TrainDataset(rows, max_side=160)[1]
     assert item["image"].shape == (3, 160, 160) and 0 < item["target"].mean() < 1  # masked image: partial target
+    assert TrainDataset(rows, max_side=1024)[0]["image"].shape == (3, 192, 192)  # own size, cut to the patch grid
 
     patch_logits, image_logit = model(item["image"][None])
     assert patch_logits.shape == (1, 1, 10, 10) and image_logit.shape == (1,)
@@ -57,8 +59,10 @@ def test_pipeline(tmp_path):
     m.update(torch.tensor([2.0, -2.0, 2.0, -2.0]), torch.tensor([1.0, 0.0, 0.0, 1.0]))
     assert m.summary() == {"acc": 0.5, "prec": 0.5, "rec": 0.5, "f1": 0.5, "fpr": 0.5}
 
+    shapes = {tuple(TrainDataset(rows)[i]["image"].shape[1:]) for i in range(2, 8)}
+    assert len(shapes) == 6 and all(side % 16 == 0 for shape in shapes for side in shape)  # own sizes, on the patch grid
     cfg = dict(device="cpu", out=str(tmp_path / "run"), batch_size=2, num_workers=0, lr=1e-3, weight_decay=0.0, epochs=1)
-    best = train(model, TrainDataset(rows[2:], 160), TrainDataset(rows[:4], 160, seed=1), cfg)
+    best = train(model, TrainDataset(rows[2:]), TrainDataset(rows[:4], seed=1), cfg)  # images of different sizes
     assert "val_f1" in (tmp_path / "run" / "metrics.csv").read_text()
     model = Detector.load(best)
 

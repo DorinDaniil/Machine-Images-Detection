@@ -42,12 +42,14 @@ def to_tensor(image) -> torch.Tensor:
 class TrainDataset(Dataset):
     """rows: dicts with "path", "label" (0 real, 1 generated) and "mask" (path or empty).
 
-    View: short side scaled to crop * U(1, 1.7), random crop, random flip, degradations.
+    View: the image at its own resolution, never resized. A side longer than max_side is cut to max_side by a
+    random crop, and both sides are cut to the patch grid; then a random flip and degradations.
     Target map: the mask if the image has one (only that region is generated), else the label everywhere.
+    Sizes differ from image to image, so the loader gives one image at a time (see train.py).
     """
 
-    def __init__(self, rows: list[dict], crop: int, seed: int = 0):
-        self.rows, self.crop, self.seed, self.epoch = rows, crop, seed, 0
+    def __init__(self, rows: list[dict], max_side: int = 1024, patch: int = 16, seed: int = 0):
+        self.rows, self.max_side, self.patch, self.seed, self.epoch = rows, max_side, patch, seed, 0
 
     def __len__(self):
         return len(self.rows)
@@ -63,11 +65,10 @@ class TrainDataset(Dataset):
         else:
             target = Image.new("L", image.size, 255 * int(row["label"]))
 
-        scale = self.crop * rng.uniform(1.0, 1.7) / min(image.size)
-        size = (max(self.crop, round(image.width * scale)), max(self.crop, round(image.height * scale)))
-        image, target = image.resize(size, Image.BICUBIC), target.resize(size, Image.NEAREST)
-        x, y = rng.integers(0, size[0] - self.crop + 1), rng.integers(0, size[1] - self.crop + 1)
-        box = (x, y, x + self.crop, y + self.crop)
+        w = min(image.width, self.max_side) // self.patch * self.patch
+        h = min(image.height, self.max_side) // self.patch * self.patch
+        x, y = int(rng.integers(0, image.width - w + 1)), int(rng.integers(0, image.height - h + 1))
+        box = (x, y, x + w, y + h)
         image, target = image.crop(box), target.crop(box)
         if rng.random() < 0.5:
             image, target = image.transpose(Image.FLIP_LEFT_RIGHT), target.transpose(Image.FLIP_LEFT_RIGHT)
@@ -79,9 +80,12 @@ class TrainDataset(Dataset):
 class ImageDataset(Dataset):
     """items: dicts with "path", "label" and optionally "mask" (PNG, white = generated).
 
-    protocol "native":    keep resolution and bytes; shrink only above max_side; crop to the patch grid.
-    protocol "equalized": every image, real or fake, gets the same processing: short side to `size`,
-                          centre crop size x size, JPEG q90 4:2:0. Removes size and format shortcuts.
+    protocol "native":    own resolution, as in training: never resized, sides above max_side cut by a centre
+                          crop, both sides cut to the patch grid.
+    protocol "equalized": short side to `size`, centre crop size x size. Removes size and resolution
+                          shortcuts.
+    Both end with JPEG q90 4:2:0: in training every image is JPEG-compressed, so an image without JPEG
+    traces (a PNG fake) would be outside what the model has seen.
     """
 
     def __init__(self, items: list[dict], patch: int, protocol: str = "native", max_side: int = 1024, size: int = 512):
@@ -91,10 +95,8 @@ class ImageDataset(Dataset):
         return len(self.items)
 
     def _native(self, image: Image.Image, resample) -> Image.Image:
-        scale = self.max_side / max(image.size)
-        if scale < 1:
-            image = image.resize((round(image.width * scale), round(image.height * scale)), resample)
-        w, h = image.width // self.patch * self.patch, image.height // self.patch * self.patch
+        w = min(image.width, self.max_side) // self.patch * self.patch
+        h = min(image.height, self.max_side) // self.patch * self.patch
         left, top = (image.width - w) // 2, (image.height - h) // 2
         return image.crop((left, top, left + w, top + h))
 
@@ -108,9 +110,7 @@ class ImageDataset(Dataset):
         item = self.items[i]
         fit = self._native if self.protocol == "native" else self._equalized
         with Image.open(item["path"]) as im:
-            image = fit(im.convert("RGB"), Image.BICUBIC)
-        if self.protocol == "equalized":
-            image = jpeg(image, 90, subsampling=2)
+            image = jpeg(fit(im.convert("RGB"), Image.BICUBIC), 90, subsampling=2)
         out = {"image": to_tensor(image), "label": float(item["label"]), "has_mask": bool(item.get("mask"))}
         if item.get("mask"):
             with Image.open(item["mask"]) as m:

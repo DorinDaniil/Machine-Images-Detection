@@ -30,7 +30,8 @@ python scripts/run_test.py --config configs/train.yaml
 
 - train: the whole of OpenFake core/train, 300k reals (LAION, Pexels) and up to 10k images of each
   of 36 generators: API models, open flagships, the most used community fine-tunes, frames of video
-  models (list in the config); 15 % of the reals are kept apart for calibration; every row of the
+  models (list in the config); images are used at their own resolution, never resized (sides above
+  1024 are randomly cropped); 15 % of the reals are kept apart for calibration; every row of the
   data CSV keeps the OpenFake prompt, prompt kind and row id, so real / fake pairs with the same
   caption can be formed;
 - training log: accuracy, precision, recall, F1 and FPR of every epoch (train and validation) in
@@ -42,11 +43,12 @@ python scripts/run_test.py --config configs/train.yaml
     generators that also appear in training are marked;
   - SID_Set: fully synthetic and locally edited images (pixel F1 from masks) vs SID reals;
   - rendered non-photo images: measured false positives;
-- protocols: `equalized` (every image resized, cropped and JPEG-compressed the same way) and `native`;
+- protocols: `native` (own resolution, as in training) and `equalized` (every image resized and cropped
+  to 512, a check for size shortcuts); both JPEG q90, like training;
 - result: `runs/pilot/report.md`.
 
-Downloads 3.3 TB (608 train files, each deleted once its images are taken) and keeps ~0.6 TB; one GPU,
-about an hour per epoch. Generators, caps and the number of files (`max_files`): in the config.
+Downloads 3.3 TB (608 train files, each deleted once its images are taken) and keeps ~0.6 TB. Training:
+one GPU, epochs of 100k images, about an hour each. Generators, caps, files: in the config.
 
 ## Layout
 
