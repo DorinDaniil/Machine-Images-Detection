@@ -15,6 +15,7 @@ from pathlib import Path
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.stdout.reconfigure(line_buffering=True)  # every line at once, also through `| tee`
 
 from src.data import TrainDataset, openfake, render_folder, sid_set  # noqa: E402
 from src.model import Detector  # noqa: E402
