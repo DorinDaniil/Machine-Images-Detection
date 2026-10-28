@@ -59,5 +59,5 @@ src/evaluate.py   scores, threshold from calibration reals, report table
 src/data/         download.py (OpenFake, SID_Set), render.py (non-photo reals), dataset.py
 scripts/          download_data.py, run_train.py, run_test.py
 configs/          train.yaml
-notebooks/        quickstart.ipynb
+notebooks/        quickstart.ipynb (model, data), predict.ipynb (verdict and heat map on your images)
 ```
