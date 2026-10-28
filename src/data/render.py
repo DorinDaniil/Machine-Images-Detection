@@ -9,11 +9,9 @@ import io
 from pathlib import Path
 
 import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt  # noqa: E402
-import numpy as np  # noqa: E402
-from PIL import Image, ImageDraw, ImageFont  # noqa: E402
+import numpy as np
+from matplotlib.figure import Figure  # drawn off-screen without pyplot: the notebook backend stays as it is
+from PIL import Image, ImageDraw, ImageFont
 
 FONT_DIR = Path(matplotlib.__file__).parent / "mpl-data" / "fonts" / "ttf"
 FONTS = {
@@ -90,7 +88,7 @@ def ui_screen(rng, w, h, split):
 
 
 def chart(rng, w, h, split):
-    fig = plt.figure(figsize=(w / 100, h / 100), dpi=100)
+    fig = Figure(figsize=(w / 100, h / 100), dpi=100)
     ax = fig.add_subplot()
     x = np.arange(int(rng.integers(5, 30)))
     kind = rng.choice(["line", "bar", "scatter", "pie"])
@@ -107,7 +105,6 @@ def chart(rng, w, h, split):
     ax.grid(rng.random() < 0.5)
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=100)
-    plt.close(fig)
     return Image.open(buf).convert("RGB").resize((w, h), Image.NEAREST)
 
 
