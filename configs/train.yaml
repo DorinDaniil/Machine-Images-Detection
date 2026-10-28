@@ -1,7 +1,7 @@
-# Real images vs images of many open and API generators (OpenFake) and locally edited images with masks
-# (SID_Set), frozen DINOv3 + patch head, whole images at their own resolution.
+# Real images vs images of many open and API generators (OpenFake), frozen DINOv3 + patch head, whole images
+# at their own resolution; locally edited images with masks (SID_Set train) can be added below.
 # Test on newer generators, other real sources, local edits and non-photo reals, whole images.
-# Data: 300k reals, up to 10k images of each of 36 generators, 20k SID edits; ~3.4 TB downloaded, ~0.7 TB kept.
+# Data: 300k reals, up to 10k images of each of 36 generators; 3.3 TB downloaded, ~0.6 TB kept.
 
 data:
   dir: data
@@ -57,7 +57,7 @@ data:
     real_sources: [docci]
     n_per_model: 1000
   sid_train:                # SID_Set train: reals, fully synthetic and locally edited images with masks: the edits
-    n_per_class: 20000      #   teach the patch map where a region was generated. ~70 of 249 files, ~36 GB. 0: none
+    n_per_class: 0          #   teach the patch map where a region was generated. 0: off. 20000: ~70 of 249 files, ~36 GB
   sid:                      # SID_Set validation: the test of local edits
     n_per_class: 1000
   n_render: 1000            # rendered text / UI / charts / logos: half for calibration, half for FPR test

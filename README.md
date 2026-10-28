@@ -5,7 +5,7 @@ patch; the image score is the mean of the top 5 % patches, so a small edited reg
 Images are used whole at their own resolution: large ones are scored tile by tile, nothing is cropped.
 
 Training data is simply real images and images of many generators (OpenFake: SD 1.x to FLUX.2,
-GPT-Image-1, Imagen 4, Midjourney 6 and ~70 others), plus locally edited images with masks (SID_Set).
+GPT-Image-1, Imagen 4, Midjourney 6 and ~70 others); locally edited images with masks (SID_Set) can be added.
 Batches are balanced: half reals, half fakes spread over generators (equally, small generators in
 proportion to their size). Images are stored as untouched originals; every training image is compressed
 at a random quality, so the file format cannot give the answer.
@@ -31,8 +31,8 @@ python scripts/run_test.py --config configs/train.yaml
 
 - train: the whole of OpenFake core/train, 300k reals (LAION, Pexels) and up to 10k images of each
   of 36 generators: API models, open flagships, the most used community fine-tunes, frames of video
-  models (list in the config); SID_Set train: 20k reals, 20k fully synthetic and 20k locally edited
-  images whose masks teach the patch map; 15 % of the reals are kept apart for calibration; every row
+  models (list in the config); SID_Set train with locally edited images and their masks is off by
+  default (`sid_train.n_per_class`); 15 % of the reals are kept apart for calibration; every row
   of the data CSV keeps the OpenFake prompt, prompt kind and row id;
 - views: whole images at their own resolution, never resized (a side above 1024 is cut to fit memory);
   an image not stored as JPEG is JPEG-compressed once first, so both classes have a compression
@@ -51,7 +51,7 @@ python scripts/run_test.py --config configs/train.yaml
   area, a check for size shortcuts); both JPEG q90, like training;
 - result: `runs/pilot/report.md`.
 
-Downloads ~3.4 TB (each file deleted once its images are taken) and keeps ~0.7 TB. Training: one GPU,
+Downloads 3.3 TB (each file deleted once its images are taken) and keeps ~0.6 TB. Training: one GPU,
 epochs of 100k images, about an hour each. Generators, caps, files, augmentations: in the config.
 
 ## Layout
