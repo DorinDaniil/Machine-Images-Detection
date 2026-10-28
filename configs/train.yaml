@@ -67,11 +67,13 @@ model:
   topk: 0.05                # image score = mean of the top 5 % patch logits
 
 train:
-  max_side: 1024            # images at their own resolution, never resized; longer sides are cropped to this
-  samples_per_epoch: 100000 # balanced draws per epoch, then validation and a checkpoint (~1 h on one GPU)
-  epochs: 5
+  max_side: 512             # random crop at the image's own resolution, never resized. All images are at least
+                            #   512 a side, so every crop is 512 x 512 and images are batched; above 512 sizes
+                            #   differ and images go one by one (4x the patches per image at 1024)
+  samples_per_epoch: 100000 # balanced draws per epoch, then validation and a checkpoint (~10 min on one GPU)
+  epochs: 10
   balance_floor: 5000       # a generator with fewer images weighs in proportion to its size, the rest equally
-  batch_size: 32            # images per optimizer step; they go through the model one by one (sizes differ)
+  batch_size: 32            # images per optimizer step
   val_size: 5000            # images held out for validation
   lr: 3.0e-4
   weight_decay: 0.05

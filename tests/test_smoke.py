@@ -63,6 +63,8 @@ def test_pipeline(tmp_path):
     assert len(shapes) == 6 and all(side % 16 == 0 for shape in shapes for side in shape)  # own sizes, on the patch grid
     cfg = dict(device="cpu", out=str(tmp_path / "run"), batch_size=2, num_workers=0, lr=1e-3, weight_decay=0.0, epochs=1)
     best = train(model, TrainDataset(rows[2:]), TrainDataset(rows[:4], seed=1), cfg)  # images of different sizes
+    fixed = dict(cfg, max_side=160, out=str(tmp_path / "fixed"))  # every crop 160 x 160: images batched as usual
+    assert train(Detector("tiny", layers=(0, 1), head_dim=16), TrainDataset(rows[2:], 160), TrainDataset(rows[:4], 160, seed=1), fixed).exists()
     assert "val_f1" in (tmp_path / "run" / "metrics.csv").read_text()
     model = Detector.load(best)
 

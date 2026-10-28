@@ -67,20 +67,23 @@ def fmt(stats: dict) -> str:
 
 
 def train(model: Detector, train_set, val_set, cfg: dict) -> Path:
-    """cfg = the `train` block of configs/train.yaml. Images differ in size, so they go through the model one
-    at a time and the gradient of `batch_size` images is accumulated before each optimizer step. An epoch is
-    `samples_per_epoch` balanced draws (default: the size of the train set). Metrics of every epoch go to
-    <out>/metrics.csv; the checkpoint with the best validation F1 is kept as best.pt. Returns its path."""
+    """cfg = the `train` block of configs/train.yaml. An optimizer step uses `batch_size` images. If max_side
+    is at most the smallest image side (512: smaller images are skipped at download), every crop has the same
+    size and images are batched as usual; otherwise sizes differ, images go through the model one at a time
+    and the gradient is accumulated. An epoch is `samples_per_epoch` balanced draws (default: the size of the
+    train set). Metrics of every epoch go to <out>/metrics.csv; the checkpoint with the best validation F1 is
+    kept as best.pt. Returns its path."""
     device = cfg["device"] if torch.cuda.is_available() else "cpu"
     threshold, accum = cfg.get("threshold", 0.5), cfg["batch_size"]
+    per_batch = accum if cfg.get("max_side", 1024) <= cfg.get("min_side", 512) else 1
     samples = cfg.get("samples_per_epoch") or len(train_set)
     out = Path(cfg["out"])
     out.mkdir(parents=True, exist_ok=True)
     weights = balanced_weights(train_set.rows, cfg.get("balance_floor", 5000))
     sampler = WeightedRandomSampler(weights, num_samples=samples, replacement=True)
-    loader = DataLoader(train_set, batch_size=1, sampler=sampler, num_workers=cfg["num_workers"],
+    loader = DataLoader(train_set, batch_size=per_batch, sampler=sampler, num_workers=cfg["num_workers"],
                         pin_memory=device == "cuda")
-    val_loader = DataLoader(val_set, batch_size=1, num_workers=cfg["num_workers"])
+    val_loader = DataLoader(val_set, batch_size=per_batch, num_workers=cfg["num_workers"])
 
     model.to(device)
     optimizer = torch.optim.AdamW(model.head.parameters(), lr=cfg["lr"], weight_decay=cfg["weight_decay"])
@@ -94,23 +97,25 @@ def train(model: Detector, train_set, val_set, cfg: dict) -> Path:
     for epoch in range(1, cfg["epochs"] + 1):
         model.train()
         train_set.epoch = epoch
-        metrics, loss_sum, n = BinaryMetrics(threshold), 0.0, 0
+        metrics, loss_sum, n, pending, step = BinaryMetrics(threshold), 0.0, 0, 0, 0
         optimizer.zero_grad()
-        for i, batch in enumerate(loader):
+        for batch in loader:
             image, target = batch["image"].to(device), batch["target"].to(device)
             with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device == "cuda"):
                 patch_logits, image_logit = model(image)
             loss = patch_loss(patch_logits.float(), image_logit.float(), target)
-            (loss / accum).backward()
-            loss_sum += loss.item()
-            n += 1
+            (loss * len(image) / accum).backward()
+            loss_sum += loss.item() * len(image)
+            n += len(image)
+            pending += len(image)
             metrics.update(image_logit, batch["label"])
-            if (i + 1) % accum == 0:
+            if pending >= accum:
                 optimizer.step()
                 scheduler.step()
                 optimizer.zero_grad()
-                if (i + 1) // accum % 50 == 0:
-                    print(f"epoch {epoch} step {(i + 1) // accum}/{steps} loss {loss_sum / n:.4f}")
+                pending, step = 0, step + 1
+                if step % 50 == 0:
+                    print(f"epoch {epoch} step {step}/{steps} loss {loss_sum / n:.4f}")
 
         train_stats = {"loss": loss_sum / max(n, 1), **metrics.summary()}
         val_stats = validate(model, val_loader, device, threshold)
