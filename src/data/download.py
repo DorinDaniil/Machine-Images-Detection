@@ -18,6 +18,7 @@ import csv
 import io
 import json
 import os
+import re
 import shutil
 import time
 from collections import Counter
@@ -198,28 +199,35 @@ def openfake(split: str, out_dir, n_real=None, n_per_model=None, real_sources=No
 
 
 def sid_set(split: str, out_dir, n_per_class: int, min_side: int = 512) -> list[dict]:
-    """SID_Set: n_per_class reals, fully synthetic and locally edited images (with masks). Rows are shuffled, so
-    only the first few files are downloaded. Cached in <out_dir>.csv."""
+    """SID_Set: n_per_class reals, fully synthetic and locally edited images (with masks; an edit without a mask
+    is skipped). Rows are shuffled, so only the first few files are downloaded. Cached in <out_dir>.csv."""
     out_dir = Path(out_dir)
     cache = out_dir.with_suffix(".csv")
     if cache.exists():
-        return load_rows(cache)
+        rows = load_rows(cache)
+        if not any(re.fullmatch(r"\d{6}", Path(r["path"]).stem) for r in rows):  # the old code named files 000123
+            return rows
+        print(f"{cache}: written with the old file names, which could overwrite images; downloading again")
+        shutil.rmtree(out_dir, ignore_errors=True)
+        cache.unlink()
     out_dir.mkdir(parents=True, exist_ok=True)
 
     names = {0: "real", 1: "full", 2: "edit"}
     rows, counts = [], Counter()
-    for name in _files(SID_SET, f"data/{split}-"):
-        for i, row in enumerate(_rows(SID_SET, name, out_dir / "tmp", ["image", "mask", "label"]), start=len(rows)):
+    for f, name in enumerate(_files(SID_SET, f"data/{split}-")):
+        for j, row in enumerate(_rows(SID_SET, name, out_dir / "tmp", ["image", "mask", "label"])):
             kind = names[int(row["label"])]
-            if counts[kind] >= n_per_class:
+            has_mask = bool(row["mask"] and row["mask"]["bytes"])
+            if counts[kind] >= n_per_class or (kind == "edit" and not has_mask):
                 continue
-            stored = _store(row["image"]["bytes"], out_dir / f"{i:06d}", min_side)
+            stem = f"{f:04d}_{j:05d}"  # file and row: unique, whatever was skipped before
+            stored = _store(row["image"]["bytes"], out_dir / stem, min_side)
             if not stored:
                 continue
             path, size = stored
             mask = ""
-            if kind == "edit" and row["mask"] and row["mask"]["bytes"]:
-                mask = str(out_dir / f"{i:06d}_mask.png")
+            if kind == "edit":
+                mask = str(out_dir / f"{stem}_mask.png")
                 with Image.open(io.BytesIO(row["mask"]["bytes"])) as m:
                     m.convert("L").resize(size, Image.NEAREST).point(lambda v: 255 if v > 127 else 0).save(mask)
             counts[kind] += 1

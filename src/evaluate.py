@@ -10,13 +10,14 @@ from .model import Detector
 
 
 @torch.no_grad()
-def score(model: Detector, dataset, device: str):
-    """Image scores and pixel F1 of the patch map (NaN where there is no mask). One image at a time."""
+def score(model: Detector, dataset, device: str, tile: int = 1024, workers: int = 4):
+    """Image scores and pixel F1 of the patch map (NaN where there is no mask). Whole images, one at a time;
+    large ones are looked at tile by tile (Detector.full), so no part of an image is left out."""
     model.eval().to(device)
     scores, f1 = np.zeros(len(dataset)), np.full(len(dataset), np.nan)
-    for i, item in enumerate(DataLoader(dataset, batch_size=1, num_workers=2)):
+    for i, item in enumerate(DataLoader(dataset, batch_size=1, num_workers=workers)):
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device == "cuda"):
-            patch_logits, image_logit = model(item["image"].to(device))
+            patch_logits, image_logit = model.full(item["image"].to(device), tile)
         scores[i] = torch.sigmoid(image_logit.float()).item()
         if item["has_mask"].item():
             mask = item["mask"].to(device) > 0.5

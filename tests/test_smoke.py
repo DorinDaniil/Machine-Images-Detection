@@ -2,6 +2,7 @@
 
 import io
 import json
+import os
 from pathlib import Path
 
 import numpy as np
@@ -47,39 +48,242 @@ def test_pipeline(tmp_path):
     assert abs(sum(w) - 0.5) < 1e-9 and abs(w[0] - 1 / 12) < 1e-9 and abs(w[4] - 1 / 6) < 1e-9
 
     model = Detector("tiny", layers=(0, 1), head_dim=16, topk=0.1)
-    item = TrainDataset(rows, max_side=160, crop_p=0)[1]
-    assert item["image"].shape == (3, 160, 160) and 0 < item["target"].mean() < 1  # masked image: partial target
-    assert TrainDataset(rows, crop_p=0)[0]["image"].shape == (3, 192, 192)  # whole image, cut to the patch grid
-    Image.new("RGB", (900, 600), "gray").save(tmp_path / "big.png")
-    big = TrainDataset([{"path": str(tmp_path / "big.png"), "label": 0}], crop_p=1)
-    views = {tuple(big[0]["image"].shape[1:]) for big.epoch in range(20)}  # crop augmentation: a random part
-    assert len(views) > 5 and all(256 <= h <= 592 and 352 <= w <= 896 for h, w in views)
-
+    item = TrainDataset(rows, crop_p=0, down_p=0)[1]
+    assert item["image"].shape == (3, 192, 192) and 0 < item["target"].mean() < 1  # masked image: partial target
     patch_logits, image_logit = model(item["image"][None])
-    assert patch_logits.shape == (1, 1, 10, 10) and image_logit.shape == (1,)
+    assert patch_logits.shape == (1, 1, 12, 12) and image_logit.shape == (1,)
     patch_loss(patch_logits, image_logit, item["target"][None]).backward()
 
     m = BinaryMetrics(0.5)
     m.update(torch.tensor([2.0, -2.0, 2.0, -2.0]), torch.tensor([1.0, 0.0, 0.0, 1.0]))
     assert m.summary() == {"acc": 0.5, "prec": 0.5, "rec": 0.5, "f1": 0.5, "fpr": 0.5}
 
-    shapes = {tuple(TrainDataset(rows, crop_p=0)[i]["image"].shape[1:]) for i in range(2, 8)}
-    assert len(shapes) == 6 and all(side % 16 == 0 for shape in shapes for side in shape)  # own sizes, on the patch grid
-    cfg = dict(device="cpu", out=str(tmp_path / "run"), batch_size=2, num_workers=0, lr=1e-3, weight_decay=0.0, epochs=1)
-    best = train(model, TrainDataset(rows[2:]), TrainDataset(rows[:4], seed=1), cfg)  # images of different sizes
-    fixed = dict(cfg, max_side=160, crop_p=0, out=str(tmp_path / "fixed"))  # every view 160 x 160: batched as usual
-    assert train(Detector("tiny", layers=(0, 1), head_dim=16), TrainDataset(rows[2:], 160, crop_p=0),
-                 TrainDataset(rows[:4], 160, seed=1, crop_p=0), fixed).exists()
-    assert "val_f1" in (tmp_path / "run" / "metrics.csv").read_text()
-    model = Detector.load(best)
+    cfg = dict(device="cpu", out=str(tmp_path / "run"), batch_size=2, num_workers=0, lr=1e-3, weight_decay=0.0, epochs=2)
+    best = train(model, TrainDataset(rows[2:]), TrainDataset(rows[:4], seed=1, crop_p=0, down_p=0), cfg)
+    log = (tmp_path / "run" / "metrics.csv").read_text().splitlines()
+    val_loss = [float(line.split(",")[log[0].split(",").index("val_loss")]) for line in log[1:]]
+    assert len(val_loss) == 2 and best.exists()
+    best_model, last_model = Detector.load(best), Detector.load(tmp_path / "run" / "last.pt")
+    same = all(torch.equal(a, b) for a, b in zip(best_model.head.state_dict().values(), last_model.head.state_dict().values()))
+    assert same == (val_loss[1] <= val_loss[0])  # best.pt = the epoch with the lowest validation loss
 
     for protocol in ("native", "equalized"):
         reals = [r for r in rows if r["label"] == 0]
-        real_scores, _ = score(model, ImageDataset(reals, model.patch_size, protocol), "cpu")
-        fake_scores, f1 = score(model, ImageDataset(rows[1:2], model.patch_size, protocol), "cpu")
-        assert np.isfinite(f1).all()
+        real_scores, _ = score(best_model, ImageDataset(reals, best_model.patch_size, protocol), "cpu", tile=64, workers=0)
+        fake_scores, f1 = score(best_model, ImageDataset(rows[1:2], best_model.patch_size, protocol), "cpu", tile=64, workers=0)
+        assert np.isfinite(f1).all() and ((0 < real_scores) & (real_scores < 1)).all()
         thr = threshold_at(real_scores[:2], 0.5)
         assert "| edit |" in report(thr, {"reals": real_scores[2:]}, [("edit", real_scores, fake_scores, f1)])
+
+
+def test_train_views(tmp_path):
+    """Whole images at their own size; the memory cut, the crop and the downscale stay in their ranges;
+    targets follow the label; nothing is ever enlarged."""
+    rows = make_rows(tmp_path)
+    for i in range(2, 8):  # own size: at most a 0-7 px shift and the patch grid less, never enlarged
+        h, w = TrainDataset(rows, crop_p=0, down_p=0)[i]["image"].shape[1:]
+        w0, h0 = Image.open(rows[i]["path"]).size
+        assert h % 16 == 0 == w % 16 and h0 - 22 <= h <= h0 and w0 - 22 <= w <= w0, (i, h, w)
+    assert TrainDataset(rows, max_side=160, crop_p=0, down_p=0)[2]["image"].shape == (3, 160, 160)  # memory cut
+    real, fake = TrainDataset(rows, crop_p=0, down_p=0)[0], TrainDataset(rows, crop_p=0, down_p=0)[3]
+    assert real["target"].max() == 0 and fake["target"].min() == 1 and real["label"] == 0 and fake["label"] == 1
+
+    Image.new("RGB", (900, 600), "gray").save(tmp_path / "big.png")
+    for aug in ({"crop_p": 1, "down_p": 0}, {"crop_p": 0, "down_p": 1}, {"crop_p": 1, "down_p": 1}):
+        big = TrainDataset([{"path": str(tmp_path / "big.png"), "label": 0}], **aug)
+        views = set()
+        for big.epoch in range(25):
+            views.add(tuple(big[0]["image"].shape[1:]))
+        assert len(views) > 5, aug  # a different view every epoch
+        assert all(h % 16 == 0 and w % 16 == 0 and 240 <= h <= 592 and 240 <= w <= 896 for h, w in views), (aug, views)
+    big = TrainDataset([{"path": str(tmp_path / "big.png"), "label": 0}], crop_p=0, down_p=1)
+    assert all(big[0]["image"].shape[1] >= 288 for big.epoch in range(25))  # downscale at most by 2
+
+
+def test_augment_alignment(tmp_path):
+    """The target map follows the generated region through crop, downscale and flip."""
+    image = np.full((500, 600, 3), 128, np.uint8)
+    image[150:350, 200:450] = (255, 0, 0)
+    mask = np.zeros((500, 600), np.uint8)
+    mask[150:350, 200:450] = 255
+    Image.fromarray(image).save(tmp_path / "edit.png")
+    Image.fromarray(mask).save(tmp_path / "edit_mask.png")
+    ds = TrainDataset([{"path": str(tmp_path / "edit.png"), "label": 1, "mask": str(tmp_path / "edit_mask.png")}],
+                      crop_p=1, down_p=1)
+    checked = 0
+    for ds.epoch in range(30):
+        item = ds[0]
+        target, red = item["target"][0], item["image"][0] - item["image"][1]  # red minus green: ~1 in the region
+        assert target.shape == item["image"].shape[1:]
+        inside, outside = target > 0.5, target < 0.5
+        if inside.sum() > 100 and outside.sum() > 100:
+            assert red[inside].mean() > 0.6 and red[outside].mean() < 0.25, ds.epoch
+            checked += 1
+    assert checked >= 10
+
+
+def test_tiles_and_pool():
+    """One tile is the plain forward pass; tiles are stitched into the whole patch map; top-k is capped."""
+    torch.manual_seed(0)
+    model = Detector("tiny", layers=(0, 1), head_dim=16, topk=0.05).eval()
+    x = torch.rand(1, 3, 160, 208)
+    with torch.no_grad():
+        plain = model(x)
+    whole = model.full(x, tile=1024)
+    assert torch.allclose(plain[0], whole[0], atol=1e-5) and torch.allclose(plain[1], whole[1], atol=1e-5)
+    patch_logits, image_logit = model.full(x, tile=64)
+    assert patch_logits.shape == (1, 1, 10, 13) and image_logit.shape == (1,)
+    with torch.no_grad():  # the first tile of a 64-px tiling is the top-left 48 x 48 (10 x 13 patches cut evenly)
+        corner = model.patches(x[:, :, :48, :48])
+    assert torch.allclose(patch_logits[:, :, :3, :3], corner, atol=1e-5)
+
+    hot = torch.zeros(1, 1, 100, 100)
+    hot.view(-1)[:50] = 1.0  # 10 000 patches, 50 of them generated
+    assert model.pool(hot).item() == pytest.approx(50 / 500)  # 5 % of all patches, as in training
+    assert model.pool(hot.bfloat16()).dtype == torch.float32  # no bf16 ties at the threshold
+
+
+def test_test_views(tmp_path):
+    """Test images are never cropped beyond the patch grid; equalized keeps the whole image at a fixed area;
+    the mask follows the image."""
+    image = np.full((500, 700, 3), 128, np.uint8)
+    image[:, 650:] = (255, 0, 0)  # a region at the far right edge must stay in view
+    mask = np.zeros((500, 700), np.uint8)
+    mask[:, 650:] = 255
+    Image.fromarray(image).save(tmp_path / "wide.png")
+    Image.fromarray(mask).save(tmp_path / "wide_mask.png")
+    items = [{"path": str(tmp_path / "wide.png"), "label": 1, "mask": str(tmp_path / "wide_mask.png")}]
+    native = ImageDataset(items, 16, "native")[0]
+    assert native["image"].shape == (3, 496, 688) and native["mask"].shape == (1, 496, 688)
+    equalized = ImageDataset(items, 16, "equalized")[0]
+    h, w = equalized["image"].shape[1:]
+    assert abs(h * w - 512 * 512) < 0.05 * 512 * 512 and abs(w / h - 700 / 500) < 0.05 and h % 16 == 0 == w % 16
+    for item in (native, equalized):
+        red, region = item["image"][0] - item["image"][1], item["mask"][0] > 0.5
+        assert region.any() and red[region].mean() > 0.6 and red[~region].mean() < 0.2
+
+
+def test_compression_history(tmp_path):
+    """A file not stored as JPEG gets one JPEG pass before anything else; a JPEG file is read as it is."""
+    from src.data.dataset import load
+
+    pixels = np.random.default_rng(0).integers(0, 255, (64, 64, 3), dtype=np.uint8)
+    Image.fromarray(pixels).save(tmp_path / "fake.png")
+    Image.fromarray(pixels).save(tmp_path / "real.jpg", quality=90)
+    assert not np.array_equal(np.asarray(load(tmp_path / "fake.png")), pixels)  # lossy pass for the PNG
+    with Image.open(tmp_path / "real.jpg") as im:
+        assert np.array_equal(np.asarray(load(tmp_path / "real.jpg")), np.asarray(im.convert("RGB")))
+    a, b = load(tmp_path / "fake.png", np.random.default_rng(1)), load(tmp_path / "fake.png", np.random.default_rng(2))
+    assert a.size == b.size == (64, 64)
+
+
+def test_sid_names_unique(tmp_path, monkeypatch):
+    """Rows skipped in one file must not make the next file overwrite stored images."""
+    from src.data import download
+
+    def png(color, mode="RGB"):
+        buf = io.BytesIO()
+        Image.new(mode, (520, 520), color).save(buf, format="PNG")
+        return {"bytes": buf.getvalue()}
+
+    colors = {0: (0, 0, 255), 1: (0, 255, 0), 2: (255, 0, 0)}
+    row = lambda label: {"image": png(colors[label]), "label": label, "mask": png(255, "L") if label == 2 else None}  # noqa: E731
+    no_mask = dict(row(2), mask=None)
+    files = {"data/validation-0": [row(0), row(0), row(0), row(0), no_mask, row(2)], "data/validation-1": [row(1)] * 3 + [row(2)] * 3}
+    monkeypatch.setattr(download, "_files", lambda repo, prefix: list(files))
+    monkeypatch.setattr(download, "_rows", lambda repo, name, tmp, cols: iter(files[name]))
+    rows = download.sid_set("validation", tmp_path / "sid", n_per_class=2)
+    assert len(rows) == 6 and len({r["path"] for r in rows}) == 6
+    for r in rows:  # every stored image is the one its row says
+        kind = {"": 0, "sid-full": 1, "sid-edit": 2}[r["generator"]]
+        assert Image.open(r["path"]).convert("RGB").getpixel((5, 5)) == colors[kind]
+        assert bool(r["mask"]) == (kind == 2)
+    old = [dict(r, path=str(tmp_path / "sid" / "000004.png")) for r in rows]  # names of the old code
+    save_rows(old, tmp_path / "sid.csv")
+    assert download.sid_set("validation", tmp_path / "sid", n_per_class=2) == rows  # rebuilt, not reused
+
+
+def test_scripts_end_to_end(tmp_path):
+    """download_data.py, run_train.py, run_test.py and the predict notebook on a tiny model and tiny data,
+    as on the server: whole images, tiles at test, SID edits with masks in training."""
+    import subprocess
+    import sys
+
+    import yaml
+
+    repo = Path(__file__).resolve().parents[1]
+    data = tmp_path / "data"
+    rng = np.random.default_rng(0)
+
+    def table(name, spec):  # spec: (label, generator, source, masked) per image; data/<name>.csv as the loaders cache it
+        folder = data / name
+        folder.mkdir(parents=True)
+        rows = []
+        for i, (label, generator, source, masked) in enumerate(spec):
+            w, h = 288 + 16 * (i % 3), 256 + 16 * (i % 2)
+            cells = 6 if label else 24
+            Image.fromarray(rng.integers(0, 255, (cells, cells, 3), dtype=np.uint8)).resize((w, h), Image.BICUBIC).save(folder / f"{i}.png")
+            mask = ""
+            if masked:
+                m = np.zeros((h, w), np.uint8)
+                m[60:160, 80:200] = 255
+                mask = str(folder / f"{i}_mask.png")
+                Image.fromarray(m).save(mask)
+            rows.append({"path": str(folder / f"{i}.png"), "label": label, "generator": generator, "mask": mask, "source": source})
+        save_rows(rows, data / f"{name}.csv")
+
+    sid = [(0, "", "sid/real", False)] * 3 + [(1, "sid-full", "sid/full", False)] * 3 + [(1, "sid-edit", "sid/edit", True)] * 3
+    table("openfake_train", [(0, "", "openfake/laion", False)] * 12 + [(1, "gen-a", "openfake", False)] * 6 + [(1, "gen-b", "openfake", False)] * 6)
+    table("openfake_test", [(0, "", "openfake/docci", False)] * 6 + [(1, "gen-a", "openfake", False)] * 3 + [(1, "gen-new", "openfake", False)] * 3)
+    table("sid_train", sid)
+    table("sid_validation", sid)
+
+    cfg = {"data": {"dir": "data", "workers": 1, "train": {"n_real": None, "n_per_model": None},
+                    "test": {"n_real": 10, "real_sources": ["docci"], "n_per_model": 10},
+                    "sid_train": {"n_per_class": 3}, "sid": {"n_per_class": 3}, "n_render": 8},
+           "model": {"backbone": "tiny", "layers": [0, 1], "head_dim": 16, "topk": 0.05},
+           "train": {"max_side": 128, "crop_p": 0.5, "down_p": 0.3, "samples_per_epoch": 16, "epochs": 2,
+                     "balance_floor": 5000, "batch_size": 4, "val_size": 4, "lr": 1e-3, "weight_decay": 0.0,
+                     "num_workers": 0, "device": "cpu", "out": "runs/pilot"},
+           "test": {"alpha": 0.1, "max_calib": 6, "protocols": ["native", "equalized"]}}
+    (tmp_path / "tiny.yaml").write_text(yaml.safe_dump(cfg))
+
+    def run(script):  # offline: a call to the Hub fails at once instead of downloading
+        env = dict(os.environ, HF_HUB_OFFLINE="1", HF_DATASETS_OFFLINE="1")
+        done = subprocess.run([sys.executable, str(repo / "scripts" / script), "--config", "tiny.yaml"],
+                              cwd=tmp_path, capture_output=True, text=True, timeout=300, env=env)
+        assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-3000:]
+        return done.stdout
+
+    run("download_data.py")  # everything is cached: nothing is downloaded
+    train_log = run("run_train.py")
+    assert "with masks" in train_log and "best.pt: epoch" in train_log
+    calibration = json.loads((tmp_path / "runs" / "pilot" / "calibration.json").read_text())
+    train_paths = {r["path"] for name in ("openfake_train", "sid_train") for r in load_rows(data / f"{name}.csv")}
+    assert set(calibration["reals"]) <= train_paths and len(calibration["renders"]) == 4
+    run("run_test.py")
+    report_md = (tmp_path / "runs" / "pilot" / "report.md").read_text()
+    assert report_md.index("## protocol: native") < report_md.index("## protocol: equalized")
+    assert "| gen-a (in train) |" in report_md and "| gen-new |" in report_md and "| sid-edit (in train) |" in report_md
+    assert "calibration reals. unseen OpenFake generators: mean TPR" in report_md
+
+    import matplotlib  # the predict notebook, cell by cell, with the trained tiny model
+    matplotlib.use("Agg")
+    (tmp_path / "configs").mkdir()
+    (tmp_path / "configs" / "train.yaml").write_text(yaml.safe_dump(cfg))
+    (tmp_path / "my_images").mkdir()
+    Image.open(data / "openfake_test" / "7.png").save(tmp_path / "my_images" / "example.jpg")
+    nb = json.loads((repo / "notebooks" / "predict.ipynb").read_text(encoding="utf-8"))
+    cwd = Path.cwd()
+    os.chdir(tmp_path)
+    try:
+        ns = {}
+        for cell in nb["cells"]:
+            if cell["cell_type"] == "code":
+                exec("".join(cell["source"]), ns)
+    finally:
+        os.chdir(cwd)
+    assert set(ns["thresholds"]) == {"native", "equalized"} and 0 <= ns["prob"] <= 1
 
 
 def test_store_and_renders(tmp_path):

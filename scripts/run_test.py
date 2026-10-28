@@ -1,15 +1,18 @@
 """python scripts/run_test.py --config configs/train.yaml
 
-Threshold: exceeded by alpha of the calibration reals (held-out OpenFake train reals + renders), never by test images.
+Whole images: nothing is cropped; large images are looked at tile by tile (Detector.full).
+Threshold: exceeded by alpha of the calibration reals (held-out train reals + renders), never by test images.
 Tests:
     OpenFake core/test   newer generators against DOCCI reals; generators also seen in training are marked
     SID_Set validation   fully synthetic and locally edited images (masks -> pixel F1) against SID reals
     renders              text pages, UI screens, charts, logos: false positives on non-photo reals
-Protocols: "equalized" (same resize, crop and JPEG for every image) and "native". Result: runs/pilot/report.md
+Protocols: "native" (own resolution, as in training) and "equalized" (every image resized to the same area).
+Result: runs/pilot/report.md
 """
 
 import argparse
 import json
+import random
 import sys
 from pathlib import Path
 
@@ -31,10 +34,12 @@ data, out = Path(d["dir"]), Path(t["out"])
 device = t["device"] if torch.cuda.is_available() else "cpu"
 model = Detector.load(out / "best.pt", device)
 
-calib_files = json.load(open(data / "calibration.json"))
-calib = [{"path": p, "label": 0} for p in calib_files["openfake_reals"] + calib_files["renders"]]
+calib_files = json.load(open(out / "calibration.json" if (out / "calibration.json").exists() else data / "calibration.json"))
+calib = (calib_files.get("reals") or calib_files["openfake_reals"]) + calib_files["renders"]  # older runs: other key, in data/
+calib = [{"path": p, "label": 0} for p in random.Random(0).sample(calib, min(len(calib), test.get("max_calib", 10000)))]
 renders = [{"path": p, "label": 0} for p in calib_files["renders_test"]]
-seen = {r["generator"] for r in load_rows(data / "openfake_train.csv")}
+seen = {r["generator"] for name in ("openfake_train.csv", "sid_train.csv") if (data / name).exists()
+        for r in load_rows(data / name)}
 
 openfake_rows = openfake("test", data / "openfake_test", workers=d["workers"], **d["test"])
 sid_rows = sid_set("validation", data / "sid_validation", **d["sid"])
@@ -42,7 +47,7 @@ sid_rows = sid_set("validation", data / "sid_validation", **d["sid"])
 tables = []
 for protocol in test["protocols"]:
     def run(rows):
-        return score(model, ImageDataset(rows, model.patch_size, protocol, max_side=t["max_side"]), device)
+        return score(model, ImageDataset(rows, model.patch_size, protocol), device, t["max_side"], t["num_workers"])
 
     thr = threshold_at(run(calib)[0], test["alpha"])
     docci, _ = run([r for r in openfake_rows if r["label"] == 0])
@@ -55,7 +60,7 @@ for protocol in test["protocols"]:
         fakes.append((f"{gen}{' (in train)' if gen in seen else ''}", docci, s, f1))
     for kind in ("sid-full", "sid-edit"):
         s, f1 = run([r for r in sid_rows if r["generator"] == kind])
-        fakes.append((kind, sid_real, s, f1))
+        fakes.append((f"{kind}{' (in train)' if kind in seen else ''}", sid_real, s, f1))
 
     unseen = [f for name, _, f, _ in fakes if not name.endswith("(in train)") and not name.startswith("sid")]
     summary = f"unseen OpenFake generators: mean TPR {np.mean([(f > thr).mean() for f in unseen]):.3f}" if unseen else ""

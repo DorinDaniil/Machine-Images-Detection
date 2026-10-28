@@ -1,7 +1,7 @@
-# Real images vs images of many open and API generators (OpenFake), frozen DINOv3 + patch head.
-# Test on newer generators, other real sources, local edits and non-photo reals.
-# Pilot: 300k reals and up to 10k images of each of 36 generators from the whole of OpenFake train:
-# 3.3 TB downloaded, ~0.6 TB kept on disk.
+# Real images vs images of many open and API generators (OpenFake) and locally edited images with masks
+# (SID_Set), frozen DINOv3 + patch head, whole images at their own resolution.
+# Test on newer generators, other real sources, local edits and non-photo reals, whole images.
+# Data: 300k reals, up to 10k images of each of 36 generators, 20k SID edits; ~3.4 TB downloaded, ~0.7 TB kept.
 
 data:
   dir: data
@@ -56,7 +56,9 @@ data:
     n_real: 5000
     real_sources: [docci]
     n_per_model: 1000
-  sid:                      # SID_Set validation: local edits with masks (not used for training)
+  sid_train:                # SID_Set train: reals, fully synthetic and locally edited images with masks: the edits
+    n_per_class: 20000      #   teach the patch map where a region was generated. ~70 of 249 files, ~36 GB. 0: none
+  sid:                      # SID_Set validation: the test of local edits
     n_per_class: 1000
   n_render: 1000            # rendered text / UI / charts / logos: half for calibration, half for FPR test
 
@@ -67,14 +69,18 @@ model:
   topk: 0.05                # image score = mean of the top 5 % patch logits
 
 train:
-  max_side: 1536            # whole images at their own resolution, never resized; this is a memory limit only:
-                            #   a longer side (large photos) is cut by a random crop. Test uses it too
-  crop_p: 0.5               # augmentation: a random part of the image (each side 40-100 %, at least 256 px)
+  max_side: 1024            # whole images at their own resolution, never resized. A longer side is cut by a random
+                            #   crop to fit memory (only large photos). The test looks at large images tile by tile
+  crop_p: 0.5               # augmentation: a random part of the image, each side 40-100 % (at least 256 px)
+  down_p: 0.3               # augmentation: downscaled by 0.5-1 and kept smaller, as images shared online
+                            #   further, for every image (src/data/dataset.py): one JPEG pass first if not stored
+                            #   as JPEG; a 0-7 px shift; flip; resampling 20 %, blur 10 %, noise 20 %; JPEG q60-95
+                            #   or WebP (20 %), a second JPEG 25 %
   samples_per_epoch: 100000 # balanced draws per epoch, then validation and a checkpoint (~1 h on one GPU)
-  epochs: 5
+  epochs: 6
   balance_floor: 5000       # a generator with fewer images weighs in proportion to its size, the rest equally
   batch_size: 32            # images per optimizer step; sizes differ, so they go through the model one by one
-  val_size: 5000            # images held out for validation
+  val_size: 5000            # images held out for validation; best.pt = epoch with the lowest validation loss
   lr: 3.0e-4
   weight_decay: 0.05
   num_workers: 8
@@ -83,4 +89,5 @@ train:
 
 test:
   alpha: 0.01               # target false-positive rate; threshold from calibration reals only
-  protocols: [equalized, native]
+  max_calib: 10000          # calibration reals used (of the 15 % held out): enough for a 1 % threshold
+  protocols: [native, equalized]

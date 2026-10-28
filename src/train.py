@@ -47,7 +47,7 @@ def validate(model: Detector, loader: DataLoader, device: str, threshold: float)
             patch_logits, image_logit = model(image)
         loss_sum += patch_loss(patch_logits.float(), image_logit.float(), target).item() * len(image)
         n += len(image)
-        metrics.update(image_logit, batch["label"])
+        metrics.update(image_logit, target.flatten(1).amax(1))  # label of the view, as in the loss
     return {"loss": loss_sum / max(n, 1), **metrics.summary()}
 
 
@@ -67,24 +67,22 @@ def fmt(stats: dict) -> str:
 
 
 def train(model: Detector, train_set, val_set, cfg: dict) -> Path:
-    """cfg = the `train` block of configs/train.yaml. An optimizer step uses `batch_size` images. If max_side
-    is at most the smallest image side (512: smaller images are skipped at download) and there is no crop
-    augmentation, every view has the same size and images are batched as usual; otherwise sizes differ,
-    images go through the model one at a time and the gradient is accumulated. An epoch is `samples_per_epoch` balanced draws (default: the size of the
-    train set). Metrics of every epoch go to <out>/metrics.csv; the checkpoint with the best validation F1 is
-    kept as best.pt. Returns its path."""
+    """cfg = the `train` block of configs/train.yaml. Images differ in size, so they go through the model one
+    at a time and the gradient of `batch_size` images is accumulated before each optimizer step (a remainder
+    smaller than `batch_size` at the end of an epoch is dropped). An epoch is `samples_per_epoch` balanced draws
+    (default: the size of the train set). Metrics of every epoch go to <out>/metrics.csv; best.pt is the epoch
+    with the lowest validation loss: it does not depend on a threshold, and the test sets its own one.
+    Returns the path of best.pt."""
     device = cfg["device"] if torch.cuda.is_available() else "cpu"
     threshold, accum = cfg.get("threshold", 0.5), cfg["batch_size"]
-    fixed = cfg.get("crop_p", 0.5) == 0 and cfg.get("max_side", 1536) <= cfg.get("min_side", 512)
-    per_batch = accum if fixed else 1  # one image at a time unless every view has the same size
     samples = cfg.get("samples_per_epoch") or len(train_set)
     out = Path(cfg["out"])
     out.mkdir(parents=True, exist_ok=True)
     weights = balanced_weights(train_set.rows, cfg.get("balance_floor", 5000))
     sampler = WeightedRandomSampler(weights, num_samples=samples, replacement=True)
-    loader = DataLoader(train_set, batch_size=per_batch, sampler=sampler, num_workers=cfg["num_workers"],
+    loader = DataLoader(train_set, batch_size=1, sampler=sampler, num_workers=cfg["num_workers"],
                         pin_memory=device == "cuda")
-    val_loader = DataLoader(val_set, batch_size=per_batch, num_workers=cfg["num_workers"])
+    val_loader = DataLoader(val_set, batch_size=1, num_workers=cfg["num_workers"])
 
     model.to(device)
     optimizer = torch.optim.AdamW(model.head.parameters(), lr=cfg["lr"], weight_decay=cfg["weight_decay"])
@@ -94,29 +92,28 @@ def train(model: Detector, train_set, val_set, cfg: dict) -> Path:
     schedule = lambda step: min(1.0, (step + 1) / warmup) * 0.5 * (1 + math.cos(math.pi * step / total))  # noqa: E731
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, schedule)
 
-    best, log = -1.0, []
+    best, best_epoch, log = math.inf, 0, []
     for epoch in range(1, cfg["epochs"] + 1):
         model.train()
         train_set.epoch = epoch
-        metrics, loss_sum, n, pending, step = BinaryMetrics(threshold), 0.0, 0, 0, 0
+        metrics, loss_sum, n, step = BinaryMetrics(threshold), 0.0, 0, 0
         optimizer.zero_grad()
         for batch in loader:
             image, target = batch["image"].to(device), batch["target"].to(device)
             with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device == "cuda"):
                 patch_logits, image_logit = model(image)
             loss = patch_loss(patch_logits.float(), image_logit.float(), target)
-            (loss * len(image) / accum).backward()
-            loss_sum += loss.item() * len(image)
-            n += len(image)
-            pending += len(image)
-            metrics.update(image_logit, batch["label"])
-            if pending >= accum:
+            (loss / accum).backward()
+            loss_sum += loss.item()
+            n += 1
+            metrics.update(image_logit, target.flatten(1).amax(1))  # a crop can cut an edit out
+            if n % accum == 0:
                 optimizer.step()
                 scheduler.step()
                 optimizer.zero_grad()
-                pending, step = 0, step + 1
+                step += 1
                 if step % 50 == 0:
-                    print(f"epoch {epoch} step {step}/{steps} loss {loss_sum / n:.4f}")
+                    print(f"epoch {epoch} step {step}/{steps} mean loss {loss_sum / n:.4f}")
 
         train_stats = {"loss": loss_sum / max(n, 1), **metrics.summary()}
         val_stats = validate(model, val_loader, device, threshold)
@@ -128,7 +125,8 @@ def train(model: Detector, train_set, val_set, cfg: dict) -> Path:
             writer.writerows(log)
 
         model.save(out / "last.pt")
-        if val_stats["f1"] >= best:
-            best = val_stats["f1"]
+        if val_stats["loss"] <= best:
+            best, best_epoch = val_stats["loss"], epoch
             model.save(out / "best.pt")
+    print(f"best.pt: epoch {best_epoch}, validation loss {best:.4f}")
     return out / "best.pt"
