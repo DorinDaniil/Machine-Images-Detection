@@ -76,10 +76,12 @@ train:
                             #   further, for every image (src/data/dataset.py): one JPEG pass first if not stored
                             #   as JPEG; a 0-7 px shift; flip; resampling 20 %, blur 10 %, noise 20 %; JPEG q60-95
                             #   or WebP (20 %), a second JPEG 25 %
-  samples_per_epoch: 100000 # balanced draws per epoch, then validation and a checkpoint (~1 h on one GPU)
-  epochs: 6
+  samples_per_epoch: null   # balanced draws per epoch, then validation and a checkpoint; null: the size of the
+                            #   train set (~560k images, ~6 h on one GPU at ~25 images/s)
+  epochs: 5
   balance_floor: 5000       # a generator with fewer images weighs in proportion to its size, the rest equally
-  batch_size: 32            # images per optimizer step; sizes differ, so they go through the model one by one
+  batch_size: 32            # images per optimizer step, as before; sizes differ, so they go through the model one
+                            #   by one and the gradient of 32 images is accumulated
   val_size: 5000            # images held out for validation; best.pt = epoch with the lowest validation loss
   lr: 3.0e-4
   weight_decay: 0.05

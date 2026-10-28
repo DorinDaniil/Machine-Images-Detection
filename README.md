@@ -52,7 +52,7 @@ python scripts/run_test.py --config configs/train.yaml
 - result: `runs/pilot/report.md`.
 
 Downloads 3.3 TB (each file deleted once its images are taken) and keeps ~0.6 TB. Training: one GPU,
-epochs of 100k images, about an hour each. Generators, caps, files, augmentations: in the config.
+5 epochs over the whole train set, about 6 hours each. Generators, caps, files, augmentations: in the config.
 
 ## Layout
 
