@@ -9,9 +9,9 @@ SID_Set (saberzl/SID_Set, CC BY 4.0): real (0), fully synthetic (1) and locally 
     of the edited region; validation: 30k rows, 17 GB, 34 files.
 
 Images are stored as their original bytes: no re-encoding, no resizing, nothing is lost. Fakes are mostly
-PNG and reals mostly JPEG, so the file format does correlate with the label; the training pipeline
-(dataset.py) removes that by JPEG-compressing every training image at a random quality. Images whose short
-side is below `min_side` are skipped, whatever the label.
+PNG and reals mostly JPEG, so the file format does correlate with the label; dataset.py removes that by
+JPEG-compressing every image not stored as JPEG once before anything else. Images whose short side is below
+`min_side` are skipped, whatever the label.
 """
 
 import csv
@@ -86,15 +86,6 @@ def _rows(repo: str, name: str, tmp_dir: Path, columns: list[str]):
         path.unlink(missing_ok=True)
 
 
-def _columns(repo: str, name: str, columns: list[str]) -> list[dict]:
-    """Reads only `columns` of a remote parquet file (a few MB), without downloading its images."""
-    import pyarrow.parquet as pq
-    from huggingface_hub import HfFileSystem
-
-    with HfFileSystem().open(f"datasets/{repo}/{name}", "rb") as f:
-        return pq.read_table(f, columns=columns).to_pylist()
-
-
 def _take_file(rows_iter, i: int, out_dir: Path, quota: dict, counts: Counter, taken: Counter, lock,
                real_sources, generators, min_side: int) -> dict:
     """Keeps images of file i while their shared quota is not full; `taken` records what this attempt reserved."""
@@ -131,8 +122,7 @@ def openfake(split: str, out_dir, n_real=None, n_per_model=None, real_sources=No
 
     `workers` files are downloaded at once (~5.4 GB of temporary disk each). Every finished file is recorded
     in <out_dir>/done/, so a rerun after a crash or Ctrl+C skips it; a file that breaks is retried.
-    Every row keeps the OpenFake prompt, prompt_kind and row_id; files finished before these were kept get
-    them filled in on the next run from the text columns alone. Result cached in <out_dir>.csv."""
+    Every row keeps the OpenFake prompt, prompt_kind and row_id. Result cached in <out_dir>.csv."""
     out_dir = Path(out_dir)
     cache, done_dir, tmp_dir = out_dir.with_suffix(".csv"), out_dir / "done", out_dir / "tmp"
     if cache.exists():
@@ -140,14 +130,7 @@ def openfake(split: str, out_dir, n_real=None, n_per_model=None, real_sources=No
     done_dir.mkdir(parents=True, exist_ok=True)
 
     files = _files(OPENFAKE, f"core/{split}-")[:max_files]
-    done = {p: json.loads(p.read_text()) for p in sorted(done_dir.glob("*.json"))}
-    stale = [p for p, d in done.items() if any("row_id" not in r for r in d["rows"])]
-    for p in tqdm(stale, desc=f"OpenFake {split}: prompts of finished files"):  # files done before META was kept
-        meta = _columns(OPENFAKE, files[int(p.stem)], META)
-        for r in done[p]["rows"]:
-            r.update({k: meta[int(Path(r["path"]).stem.split("_")[1])][k] or "" for k in META})
-        p.write_text(json.dumps(done[p]))
-    done = list(done.values())
+    done = [json.loads(p.read_text()) for p in sorted(done_dir.glob("*.json"))]
     counts = Counter(r["generator"] if r["label"] else "real" for d in done for r in d["rows"])
     state = {"read": sum(d["read"] for d in done), "kept": sum(len(d["rows"]) for d in done)}
     todo = [i for i in range(len(files)) if not (done_dir / f"{i:04d}.json").exists()]

@@ -34,8 +34,8 @@ data, out = Path(d["dir"]), Path(t["out"])
 device = t["device"] if torch.cuda.is_available() else "cpu"
 model = Detector.load(out / "best.pt", device)
 
-calib_files = json.load(open(out / "calibration.json" if (out / "calibration.json").exists() else data / "calibration.json"))
-calib = (calib_files.get("reals") or calib_files["openfake_reals"]) + calib_files["renders"]  # older runs: other key, in data/
+calib_files = json.load(open(out / "calibration.json"))
+calib = calib_files["reals"] + calib_files["renders"]
 calib = [{"path": p, "label": 0} for p in random.Random(0).sample(calib, min(len(calib), test.get("max_calib", 10000)))]
 renders = [{"path": p, "label": 0} for p in calib_files["renders_test"]]
 seen = {r["generator"] for name in ("openfake_train.csv", "sid_train.csv") if (data / name).exists()

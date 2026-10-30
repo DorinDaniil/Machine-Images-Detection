@@ -10,7 +10,7 @@ import pytest
 import torch
 from PIL import Image
 
-from src.data import ImageDataset, TrainDataset, load_rows, render_folder, save_rows
+from src.data import ImageDataset, load_rows, render_folder, save_rows
 from src.data.download import _store
 from src.evaluate import report, score, threshold_at
 from src.losses import patch_loss
@@ -48,7 +48,7 @@ def test_pipeline(tmp_path):
     assert abs(sum(w) - 0.5) < 1e-9 and abs(w[0] - 1 / 12) < 1e-9 and abs(w[4] - 1 / 6) < 1e-9
 
     model = Detector("tiny", layers=(0, 1), head_dim=16, topk=0.1)
-    item = TrainDataset(rows, 160, train=False)[1]
+    item = ImageDataset(rows, 160)[1]
     assert item["image"].shape == (3, 160, 160) and 0 < item["target"].mean() < 1  # masked image: partial target
     patch_logits, image_logit = model(item["image"][None])
     assert patch_logits.shape == (1, 1, 10, 10) and image_logit.shape == (1,)
@@ -59,7 +59,7 @@ def test_pipeline(tmp_path):
     assert m.summary() == {"acc": 0.5, "prec": 0.5, "rec": 0.5, "f1": 0.5, "fpr": 0.5}
 
     cfg = dict(device="cpu", out=str(tmp_path / "run"), batch_size=2, num_workers=0, lr=1e-3, weight_decay=0.0, epochs=2)
-    best = train(model, TrainDataset(rows[2:], 160), TrainDataset(rows[:4], 160, seed=1, train=False), cfg)
+    best = train(model, ImageDataset(rows[2:], 160, train=True), ImageDataset(rows[:4], 160), cfg)
     log = (tmp_path / "run" / "metrics.csv").read_text().splitlines()
     val_loss = [float(line.split(",")[log[0].split(",").index("val_loss")]) for line in log[1:]]
     assert len(val_loss) == 2 and best.exists()
@@ -75,7 +75,7 @@ def test_pipeline(tmp_path):
     assert "| edit |" in report(thr, {"reals": real_scores[2:]}, [("edit", real_scores, fake_scores, f1)])
 
 
-class Crash(TrainDataset):
+class Crash(ImageDataset):
     """Fails on its `at`-th image read, like a crash in the middle of an epoch."""
 
     def __init__(self, rows, at, **kwargs):
@@ -94,15 +94,15 @@ def test_train_resume(tmp_path):
     rows = make_rows(tmp_path)
     cfg = dict(device="cpu", out=str(tmp_path / "run"), batch_size=2, num_workers=0, lr=1e-3, weight_decay=0.0,
                epochs=2, samples_per_epoch=8, save_every=1)
-    val = TrainDataset(rows[:4], 160, seed=1, train=False)
+    val = ImageDataset(rows[:4], 160)
     with pytest.raises(RuntimeError, match="power cut"):  # 8 images, then the 5th of epoch 2 (in its 3rd batch)
-        train(Detector("tiny", layers=(0, 1), head_dim=16), Crash(rows[2:], at=13, size=160), val, cfg)
+        train(Detector("tiny", layers=(0, 1), head_dim=16), Crash(rows[2:], at=13, size=160, train=True), val, cfg)
     state = torch.load(tmp_path / "run" / "state.pt", weights_only=False)
     assert state["epoch"] == 2 and state["progress"]["n"] == 4 and len(state["log"]) == 1
     assert state["scheduler"]["last_epoch"] == 6  # 4 steps of epoch 1, 2 of epoch 2
 
     resumed = Detector("tiny", layers=(0, 1), head_dim=16)  # as a new process: weights come from the state
-    train(resumed, TrainDataset(rows[2:], 160), val, cfg, resume=True)
+    train(resumed, ImageDataset(rows[2:], 160, train=True), val, cfg, resume=True)
     state = torch.load(tmp_path / "run" / "state.pt", weights_only=False)
     assert state["epoch"] == 3 and state["progress"] is None and state["scheduler"]["last_epoch"] == 8
     epochs = [line.split(",")[0] for line in (tmp_path / "run" / "metrics.csv").read_text().splitlines()[1:]]
@@ -114,8 +114,8 @@ def test_train_views(tmp_path):
     """Every view is the whole image resized to size x size, or (augmentation) a large part of it; validation
     views are the whole image and fixed; targets follow the label."""
     rows = make_rows(tmp_path)
-    assert all(TrainDataset(rows, 160)[i]["image"].shape == (3, 160, 160) for i in range(8))
-    val = TrainDataset(rows, 160, train=False)
+    assert all(ImageDataset(rows, 160, train=True)[i]["image"].shape == (3, 160, 160) for i in range(8))
+    val = ImageDataset(rows, 160)
     assert torch.equal(val[2]["image"], val[2]["image"])  # validation views do not change
     real, fake = val[0], val[3]
     assert real["target"].max() == 0 and fake["target"].min() == 1 and real["label"] == 0 and fake["label"] == 1
@@ -124,12 +124,12 @@ def test_train_views(tmp_path):
     halves[:, 450:] = 255  # a wide image, dark left half, bright right half
     Image.fromarray(halves).save(tmp_path / "halves.png")
     item = {"path": str(tmp_path / "halves.png"), "label": 0}
-    for view in (TrainDataset([item], 128, train=False)[0]["image"], ImageDataset([item], 128)[0]["image"]):
-        row = view.mean(0)[64]
-        assert view.shape == (3, 128, 128) and row[:60].max() < 0.1 and row[68:].min() > 0.9  # squeezed, not cut
+    view = ImageDataset([item], 128)[0]["image"]
+    row = view.mean(0)[64]
+    assert view.shape == (3, 128, 128) and row[:60].max() < 0.1 and row[68:].min() > 0.9  # squeezed, not cut
 
     def bright(crop_p):  # bright share of the views: 1/2 for the whole image, flipped or not
-        ds, out = TrainDataset([item], 128, crop_p=crop_p), []
+        ds, out = ImageDataset([item], 128, train=True, crop_p=crop_p), []
         for ds.epoch in range(20):
             out.append((ds[0]["image"].mean(0) > 0.5).float().mean().item())
         return np.array(out)
@@ -149,8 +149,8 @@ def test_augment_alignment(tmp_path, monkeypatch):
     mask[150:350, 200:450] = 255
     Image.fromarray(image).save(tmp_path / "edit.png")
     Image.fromarray(mask).save(tmp_path / "edit_mask.png")
-    ds = TrainDataset([{"path": str(tmp_path / "edit.png"), "label": 1, "mask": str(tmp_path / "edit_mask.png")}],
-                      256, crop_p=0.5)
+    ds = ImageDataset([{"path": str(tmp_path / "edit.png"), "label": 1, "mask": str(tmp_path / "edit_mask.png")}],
+                      256, train=True)
     checked = 0
     for ds.epoch in range(30):
         item = ds[0]
@@ -182,8 +182,8 @@ def test_test_views(tmp_path):
     Image.fromarray(mask).save(tmp_path / "wide_mask.png")
     items = [{"path": str(tmp_path / "wide.png"), "label": 1, "mask": str(tmp_path / "wide_mask.png")}]
     item = ImageDataset(items, 256)[0]
-    assert item["image"].shape == (3, 256, 256) and item["mask"].shape == (1, 256, 256)
-    red, region = item["image"][0] - item["image"][1], item["mask"][0] > 0.5
+    assert item["image"].shape == (3, 256, 256) and item["target"].shape == (1, 256, 256) and item["has_mask"]
+    red, region = item["image"][0] - item["image"][1], item["target"][0] > 0.5
     assert region.any() and red[region].mean() > 0.6 and red[~region].mean() < 0.2
 
 
@@ -310,7 +310,7 @@ def test_scripts_end_to_end(tmp_path):
                 exec("".join(cell["source"]), ns)
     finally:
         os.chdir(cwd)
-    assert report_md.startswith(f"threshold {ns['threshold']:.4f}") and 0 <= ns["prob"] <= 1
+    assert report_md.startswith(f"threshold {ns['threshold']:.4f}") and 0 <= ns["scores"]["example.jpg"] <= 1
 
 
 def test_store_and_renders(tmp_path):
@@ -344,9 +344,6 @@ class FakeHub:
         k = int(name[1])
         return self.rows[k * len(self.rows) // 3:(k + 1) * len(self.rows) // 3]
 
-    def columns(self, repo, name, columns):
-        return [{c: r[c] for c in columns} for r in self.part(name)]
-
     def read(self, repo, name, tmp_dir, columns):
         self.opened.append(name)
         part = self.part(name)
@@ -367,7 +364,6 @@ def fake_hub(monkeypatch):
     hub = FakeHub()
     monkeypatch.setattr(download, "_files", hub.files)
     monkeypatch.setattr(download, "_rows", hub.read)
-    monkeypatch.setattr(download, "_columns", hub.columns)
     monkeypatch.setattr(download, "ATTEMPTS", 3)
     monkeypatch.setattr(download, "RETRY_WAIT", 0)
     return download, hub
@@ -389,18 +385,6 @@ def test_openfake_resume(tmp_path, monkeypatch):
     assert sum(r["label"] == 0 for r in rows) == 2
     assert sorted(r["generator"] for r in rows if r["label"]) == ["gen-a", "gen-a", "gen-b", "gen-b"]
     assert all(r["prompt"] == f"prompt {int(Path(r['path']).stem.split('_')[1]) + 15 * int(Path(r['path']).stem[:4])}" for r in rows)
-
-    # files finished before prompts were kept: the next run fills them in from the text columns only
-    for p in (tmp_path / "of" / "done").glob("*.json"):
-        part = json.loads(p.read_text())
-        for r in part["rows"]:
-            for k in ("prompt", "prompt_kind", "row_id"):
-                r.pop(k)
-        p.write_text(json.dumps(part))
-    (tmp_path / "of.csv").unlink()
-    hub.opened = []
-    again = download.openfake("test", tmp_path / "of", n_real=2, n_per_model=2, workers=3)
-    assert hub.opened == [] and again == rows and all(r["row_id"].startswith("row-") for r in again)
 
 
 def test_openfake_caps(tmp_path, monkeypatch):

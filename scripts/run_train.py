@@ -18,7 +18,7 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.stdout.reconfigure(line_buffering=True)  # every line at once, also through `| tee`
 
-from src.data import TrainDataset, openfake, render_folder, sid_set  # noqa: E402
+from src.data import ImageDataset, openfake, render_folder, sid_set  # noqa: E402
 from src.model import Detector  # noqa: E402
 from src.train import train  # noqa: E402
 
@@ -52,14 +52,13 @@ json.dump({"reals": [r["path"] for r in calib], "renders": renders[: len(renders
 pool = reals + fakes
 random.Random(1).shuffle(pool)
 n_val = min(t.get("val_size", 5000), max(2, len(pool) // 20))
-train_set = TrainDataset(pool[n_val:], t["size"], seed=0, crop_p=t.get("crop_p", 0.5))
-val_set = TrainDataset(pool[:n_val], t["size"], seed=1, train=False)  # whole images, resized, as in testing
+train_set = ImageDataset(pool[n_val:], t["size"], train=True, crop_p=t.get("crop_p", 0.5))
+val_set = ImageDataset(pool[:n_val], t["size"])  # whole images, resized, as in testing
 generators = sorted({r["generator"] for r in fakes})
 masked = sum(bool(r.get("mask")) for r in fakes)
 print(f"train {len(train_set)} images ({len(reals)} reals incl. {n_drawn} renders, {len(generators)} generators, "
-      f"{masked} with masks), "
-      f"val {len(val_set)}, calibration {len(calib)} reals; whole images resized to {t['size']} x {t['size']}, "
-      f"batch {t['batch_size']}")
+      f"{masked} with masks), val {len(val_set)}, calibration {len(calib)} reals; "
+      f"whole images resized to {t['size']} x {t['size']}, batch {t['batch_size']}")
 
 best = train(model, train_set, val_set, t, resume=args.resume)
 print(f"best checkpoint: {best}")

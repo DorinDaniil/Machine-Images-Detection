@@ -12,9 +12,9 @@ TINY = dict(depth=2, embed_dim=64, num_heads=2)  # random weights for CPU tests,
 
 
 class Backbone(nn.Module):
-    """x [B, 3, H, W] in [0, 1] -> {"grids": [B, D, H // p, W // p] for every block in `layers`, "cls": [B, D]}.
+    """x [B, 3, H, W] in [0, 1] -> patch features [B, D, H // p, W // p] of every block in `layers`.
 
-    Never trained: no gradients, always in eval mode.
+    ImageNet mean / std of the weights are applied here. Never trained: no gradients, always in eval mode.
     """
 
     def __init__(self, name: str, layers=(-1,)):
@@ -37,7 +37,6 @@ class Backbone(nn.Module):
         return self
 
     @torch.no_grad()
-    def forward(self, x: torch.Tensor) -> dict:
-        out = self.vit.forward_intermediates((x - self.mean) / self.std, indices=self.layers, norm=True,
-                                             return_prefix_tokens=True, output_fmt="NCHW", intermediates_only=True)
-        return {"grids": [grid for grid, _ in out], "cls": out[-1][1][:, 0]}
+    def forward(self, x: torch.Tensor) -> list[torch.Tensor]:
+        return self.vit.forward_intermediates((x - self.mean) / self.std, indices=self.layers, norm=True,
+                                              output_fmt="NCHW", intermediates_only=True)

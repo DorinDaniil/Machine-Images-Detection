@@ -27,21 +27,13 @@ class Detector(nn.Module):
         )
         self.topk = topk
 
-    @property
-    def patch_size(self) -> int:
-        return self.backbone.patch_size
-
-    def patches(self, x: torch.Tensor) -> torch.Tensor:
-        """x [B, 3, H, W], H and W multiples of the patch size -> patch logits [B, 1, H // p, W // p]."""
-        return self.head(torch.cat(self.backbone(x)["grids"], dim=1))
-
     def pool(self, patch_logits: torch.Tensor) -> torch.Tensor:
         flat = patch_logits.float().flatten(1)  # float32: under bf16 autocast scores would tie at the threshold
         k = max(1, round(self.topk * flat.shape[1]))
         return flat.topk(k, dim=1).values.mean(dim=1)
 
     def forward(self, x: torch.Tensor):
-        patch_logits = self.patches(x)
+        patch_logits = self.head(torch.cat(self.backbone(x), dim=1))
         return patch_logits, self.pool(patch_logits)
 
     def save(self, path) -> None:

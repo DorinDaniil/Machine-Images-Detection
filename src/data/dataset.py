@@ -1,14 +1,13 @@
-"""TrainDataset: size x size views of real and generated images, with optional masks of generated regions.
-ImageDataset: the same view of whole images for testing.
+"""ImageDataset: real and generated images, with optional masks of generated regions, as size x size views.
 
 Every image, whatever its size and shape, is resized whole to size x size (aspect not kept), as usual for vision
 models: the model sees every picture at one scale and nothing is cut off at test time. Every image is treated
 by the same random rules whatever its label, so the only thing that differs between the classes is how the
 pixels were made. Files on disk are untouched originals: fakes mostly PNG, reals mostly JPEG. So an image that
-is not stored as JPEG is first JPEG-compressed once (random quality in training, q90 in testing), as if it had
+is not stored as JPEG is first JPEG-compressed once (random quality in training, q90 otherwise), as if it had
 been published before: both classes then have a compression history. In training the augmentations come
 before the resize, at the image's own resolution, as images get them on the way through the internet before
-anyone resizes them for a model; a test image is resized as it is.
+anyone resizes them for a model.
 """
 
 import io
@@ -73,11 +72,13 @@ def to_tensor(image) -> torch.Tensor:
     return torch.from_numpy(np.array(image, dtype=np.float32) / 255).permute(2, 0, 1)
 
 
-class TrainDataset(Dataset):
-    """rows: dicts with "path", "label" (0 real, 1 generated) and "mask" (path or empty). Every item is a
-    size x size view, so images are batched as usual.
+class ImageDataset(Dataset):
+    """rows: dicts with "path", "label" (0 real, 1 generated) and optionally "mask" (PNG, white = generated).
+    Item: "image" [3, size, size]; "target" [1, size, size]: the mask if the image has one (only that region is
+    generated), else the label everywhere; "label"; "has_mask". All items have one size: batches as usual.
 
-    train=True, in this order:
+    train=False (validation, testing): the whole image resized to size x size (bicubic).
+    train=True, in this order, the target going through the same crop, resize and flip:
       read             one JPEG pass first if the file is not a JPEG (see the module docstring);
       crop_p           augmentation: a random part of 50-100 % of the image, aspect 3:4-4:3 (as RandomResizedCrop
                        on ImageNet); the other views are the whole image;
@@ -85,13 +86,10 @@ class TrainDataset(Dataset):
                        then JPEG / WebP compression, always;
       resize           to size x size, aspect not kept, with a random resampling filter;
       flip             horizontal, half of the views.
-    train=False (validation): the whole image resized to size x size (bicubic), as in testing.
-    Target map: the mask if the image has one (only that region is generated), else the label everywhere;
-    it goes through the same crop, resize and flip as the image.
     """
 
-    def __init__(self, rows: list[dict], size: int = 512, seed: int = 0, crop_p: float = 0.5, train: bool = True):
-        self.rows, self.size, self.seed, self.crop_p, self.train, self.epoch = rows, size, seed, crop_p, train, 0
+    def __init__(self, rows: list[dict], size: int = 512, train: bool = False, crop_p: float = 0.5, seed: int = 0):
+        self.rows, self.size, self.train, self.crop_p, self.seed, self.epoch = rows, size, train, crop_p, seed, 0
 
     def __len__(self):
         return len(self.rows)
@@ -123,30 +121,4 @@ class TrainDataset(Dataset):
             image, target = image.transpose(Image.FLIP_LEFT_RIGHT), target.transpose(Image.FLIP_LEFT_RIGHT)
 
         target = torch.from_numpy(np.array(target, dtype=np.float32) / 255)[None]
-        return {"image": to_tensor(image), "target": target, "label": float(row["label"])}
-
-
-class ImageDataset(Dataset):
-    """items: dicts with "path", "label" and optionally "mask" (PNG, white = generated).
-
-    The whole image resized to size x size (bicubic), as the validation views in training: nothing is cut off.
-    An image not stored as JPEG is JPEG-compressed once first (q90), see the module docstring.
-    """
-
-    def __init__(self, items: list[dict], size: int = 512):
-        self.items, self.size = items, size
-
-    def __len__(self):
-        return len(self.items)
-
-    def __getitem__(self, i):
-        item, size = self.items[i], (self.size, self.size)
-        image = load(item["path"]).resize(size, Image.BICUBIC)
-        out = {"image": to_tensor(image), "label": float(item["label"]), "has_mask": bool(item.get("mask"))}
-        if item.get("mask"):
-            with Image.open(item["mask"]) as m:
-                mask = m.convert("L").resize(size, Image.NEAREST)
-            out["mask"] = torch.from_numpy(np.array(mask, dtype=np.float32) / 255)[None]
-        else:
-            out["mask"] = torch.zeros(1, *size)
-        return out
+        return {"image": to_tensor(image), "target": target, "label": float(row["label"]), "has_mask": bool(row.get("mask"))}

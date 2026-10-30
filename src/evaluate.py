@@ -18,8 +18,8 @@ def score(model: Detector, dataset, device: str, batch_size: int = 32, workers: 
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device == "cuda"):
             patch_logits, image_logit = model(batch["image"].to(device))
         scores.append(torch.sigmoid(image_logit.float()).cpu())
-        mask = batch["mask"].to(device).flatten(1) > 0.5
-        pred = F.interpolate(patch_logits.float(), size=batch["mask"].shape[-2:], mode="bilinear").sigmoid().flatten(1) > 0.5
+        mask = batch["target"].to(device).flatten(1) > 0.5
+        pred = F.interpolate(patch_logits.float(), size=batch["target"].shape[-2:], mode="bilinear").sigmoid().flatten(1) > 0.5
         hit = 2 * (pred & mask).sum(1) / (pred.sum(1) + mask.sum(1)).clamp(min=1)
         f1.append(torch.where(batch["has_mask"], hit.cpu(), torch.nan))
     return torch.cat(scores).double().numpy(), torch.cat(f1).double().numpy()
