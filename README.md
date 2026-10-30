@@ -2,8 +2,8 @@
 
 Detection of generated and partly generated images. A frozen DINOv3 with a small head scores every
 patch; the image score is the mean of the top 5 % patches, so a small edited region still counts.
-Training views are 512 x 512 crops at the images' own resolution; the test scores whole images in 512
-tiles, so nothing is resized to fit the model and no part of a test image is left out.
+Every image, whole, is resized to 512 x 512 in training and testing, as usual for vision models: the
+model sees every picture at one scale, and no part of a test image is left out.
 
 Training data is simply real images and images of many generators (OpenFake: SD 1.x to FLUX.2,
 GPT-Image-1, Imagen 4, Midjourney 6 and ~70 others); locally edited images with masks (SID_Set) can be added.
@@ -36,9 +36,9 @@ python scripts/run_test.py --config configs/train.yaml
   default (`sid_train.n_per_class`); 15 % of the reals are kept apart for calibration; every row
   of the data CSV keeps the OpenFake prompt, prompt kind and row id;
 - views: an image not stored as JPEG is JPEG-compressed once first, so both classes have a compression
-  history; a random downscale (augmentation), then a random 512 x 512 crop at that resolution, then a
-  flip, resampling, blur, noise, JPEG or WebP compression, on both classes alike (probabilities in the
-  config); batches of 32;
+  history; for half of the images a random part of 50-100 % of the area; then, at the image's own
+  resolution as on the internet, resampling, blur, noise, JPEG or WebP compression; only then the resize
+  to 512 x 512 and a flip; both classes alike (probabilities in the config); batches of 32;
 - training log: accuracy, precision, recall, F1 and FPR of every epoch (train and validation) in
   `runs/pilot/metrics.csv`; `best.pt` is the epoch with the lowest validation loss;
 - threshold: 1 % false positives on the calibration reals and on rendered text, UI, charts, logos;
@@ -48,7 +48,7 @@ python scripts/run_test.py --config configs/train.yaml
     generators that also appear in training are marked;
   - SID_Set validation: fully synthetic and locally edited images (pixel F1 from masks) vs SID reals;
   - rendered non-photo images: measured false positives;
-- test images: whole, at their own resolution, in 512 tiles, JPEG q90 like training;
+- test images: whole, resized to 512 x 512 like training;
 - result: `runs/pilot/report.md`.
 
 Downloads 3.3 TB (each file deleted once its images are taken) and keeps ~0.6 TB. Training: one GPU,
@@ -58,7 +58,7 @@ Downloads 3.3 TB (each file deleted once its images are taken) and keeps ~0.6 TB
 
 ```
 src/backbone.py   frozen DINOv3 (timm) -> patch features of chosen blocks
-src/model.py      head, top-k pooling, tiled scoring of whole images, save / load
+src/model.py      head, top-k pooling, save / load
 src/losses.py     patch and image BCE
 src/train.py      training loop, generator-balanced sampling
 src/evaluate.py   scores, threshold from calibration reals, report table

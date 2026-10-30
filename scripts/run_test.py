@@ -1,6 +1,6 @@
 """python scripts/run_test.py --config configs/train.yaml
 
-Whole images: nothing is cropped; images larger than the training views are looked at in tiles of that size.
+Whole images resized to the training view size, size x size: nothing is cut off.
 Threshold: exceeded by alpha of the calibration reals (held-out train reals + renders), never by test images.
 Tests:
     OpenFake core/test   newer generators against DOCCI reals; generators also seen in training are marked
@@ -45,7 +45,7 @@ openfake_rows = openfake("test", data / "openfake_test", workers=d["workers"], *
 sid_rows = sid_set("validation", data / "sid_validation", **d["sid"])
 
 def run(rows):
-    return score(model, ImageDataset(rows, model.patch_size), device, t["size"], t["num_workers"])
+    return score(model, ImageDataset(rows, t["size"]), device, t["batch_size"], t["num_workers"])
 
 
 thr = threshold_at(run(calib)[0], test["alpha"])

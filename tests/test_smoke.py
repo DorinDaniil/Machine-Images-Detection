@@ -68,8 +68,8 @@ def test_pipeline(tmp_path):
     assert same == (val_loss[1] <= val_loss[0])  # best.pt = the epoch with the lowest validation loss
 
     reals = [r for r in rows if r["label"] == 0]
-    real_scores, _ = score(best_model, ImageDataset(reals, best_model.patch_size), "cpu", tile=64, workers=0)
-    fake_scores, f1 = score(best_model, ImageDataset(rows[1:2], best_model.patch_size), "cpu", tile=64, workers=0)
+    real_scores, _ = score(best_model, ImageDataset(reals, 160), "cpu", batch_size=2, workers=0)
+    fake_scores, f1 = score(best_model, ImageDataset(rows[1:2], 160), "cpu", batch_size=2, workers=0)
     assert np.isfinite(f1).all() and ((0 < real_scores) & (real_scores < 1)).all()
     thr = threshold_at(real_scores[:2], 0.5)
     assert "| edit |" in report(thr, {"reals": real_scores[2:]}, [("edit", real_scores, fake_scores, f1)])
@@ -111,35 +111,38 @@ def test_train_resume(tmp_path):
 
 
 def test_train_views(tmp_path):
-    """Every view is size x size at the image's own resolution: the pixels are not resized unless the downscale
-    augmentation says so, and then the short side stays >= size; validation views are fixed; targets follow the label."""
+    """Every view is the whole image resized to size x size, or (augmentation) a large part of it; validation
+    views are the whole image and fixed; targets follow the label."""
     rows = make_rows(tmp_path)
     assert all(TrainDataset(rows, 160)[i]["image"].shape == (3, 160, 160) for i in range(8))
-    assert TrainDataset(rows, 256)[0]["image"].shape == (3, 256, 256)  # smaller than the view: enlarged (a guard only)
     val = TrainDataset(rows, 160, train=False)
     assert torch.equal(val[2]["image"], val[2]["image"])  # validation views do not change
     real, fake = val[0], val[3]
     assert real["target"].max() == 0 and fake["target"].min() == 1 and real["label"] == 0 and fake["label"] == 1
 
-    stripes = np.zeros((600, 900, 3), np.uint8)
-    stripes[:, (np.arange(900) // 8) % 2 == 1] = 255  # vertical stripes 8 px wide
-    Image.fromarray(stripes).save(tmp_path / "stripes.png")
+    halves = np.zeros((300, 900, 3), np.uint8)
+    halves[:, 450:] = 255  # a wide image, dark left half, bright right half
+    Image.fromarray(halves).save(tmp_path / "halves.png")
+    item = {"path": str(tmp_path / "halves.png"), "label": 0}
+    for view in (TrainDataset([item], 128, train=False)[0]["image"], ImageDataset([item], 128)[0]["image"]):
+        row = view.mean(0)[64]
+        assert view.shape == (3, 128, 128) and row[:60].max() < 0.1 and row[68:].min() > 0.9  # squeezed, not cut
 
-    def widths(down_p):  # mean stripe width seen in the views: 8 px at the own resolution
-        ds, out = TrainDataset([{"path": str(tmp_path / "stripes.png"), "label": 0}], 256, down_p=down_p), []
+    def bright(crop_p):  # bright share of the views: 1/2 for the whole image, flipped or not
+        ds, out = TrainDataset([item], 128, crop_p=crop_p), []
         for ds.epoch in range(20):
-            row = ds[0]["image"][:, 128].mean(0) > 0.5  # one row, bright or dark
-            out.append(256 / (1 + (row[1:] != row[:-1]).sum().item()))
+            out.append((ds[0]["image"].mean(0) > 0.5).float().mean().item())
         return np.array(out)
 
-    native = widths(0.0)
-    assert (abs(native - 8) < 0.6).all(), native  # never resized
-    down = widths(1.0)
-    assert (down < 7.7).mean() > 0.6 and (down > 3.5).all(), down  # downscaled by 0.5-1 (600 px short side: by >= 0.43)
+    assert (abs(bright(0.0) - 0.5) < 0.03).all()
+    assert (abs(bright(1.0) - 0.5) > 0.05).mean() > 0.5  # parts of the image
 
 
-def test_augment_alignment(tmp_path):
-    """The target map follows the generated region through downscale, crop and flip."""
+def test_augment_alignment(tmp_path, monkeypatch):
+    """The target map follows the generated region through crop, shrink to MAX_SIDE, degradations, resize and flip."""
+    from src.data import dataset
+
+    monkeypatch.setattr(dataset, "MAX_SIDE", 400)  # this 600 px image counts as large
     image = np.full((500, 600, 3), 128, np.uint8)
     image[150:350, 200:450] = (255, 0, 0)
     mask = np.zeros((500, 600), np.uint8)
@@ -147,7 +150,7 @@ def test_augment_alignment(tmp_path):
     Image.fromarray(image).save(tmp_path / "edit.png")
     Image.fromarray(mask).save(tmp_path / "edit_mask.png")
     ds = TrainDataset([{"path": str(tmp_path / "edit.png"), "label": 1, "mask": str(tmp_path / "edit_mask.png")}],
-                      256, down_p=0.5)
+                      256, crop_p=0.5)
     checked = 0
     for ds.epoch in range(30):
         item = ds[0]
@@ -160,33 +163,9 @@ def test_augment_alignment(tmp_path):
     assert checked >= 10
 
 
-def test_tiles_and_pool():
-    """An image no larger than a tile is the plain forward pass; larger ones are covered by tiles of exactly the
-    tile size, stitched (and averaged where they overlap) into the whole patch map; top-k of all patches."""
-    torch.manual_seed(0)
-    model = Detector("tiny", layers=(0, 1), head_dim=16, topk=0.05).eval()
-    x = torch.rand(1, 3, 160, 208)
-    with torch.no_grad():
-        plain = model(x)
-    whole = model.full(x, tile=512)
-    assert torch.allclose(plain[0], whole[0], atol=1e-5) and torch.allclose(plain[1], whole[1], atol=1e-5)
-
-    seen = []
-    patches = model.patches
-    model.patches = lambda t: (seen.append(tuple(t.shape[2:])), patches(t))[1]  # record every tile
-    side_by_side = model.full(x, tile=64)
-    tiles_side = list(seen)
-    seen.clear()
-    overlapping = model.full(x, tile=64, step=32)
-    model.patches = patches
-    assert set(tiles_side) == set(seen) == {(64, 64)}  # every tile has the training view size
-    assert len(tiles_side) == 3 * 4 and len(seen) == 4 * 6  # 10 x 13 patches: starts 0, 4, 6 and 0, 4, 8, 9 / step 2
-    for patch_logits, image_logit in (side_by_side, overlapping):
-        assert patch_logits.shape == (1, 1, 10, 13) and image_logit.shape == (1,) and torch.isfinite(patch_logits).all()
-    with torch.no_grad():  # the top-left 4 x 4 patches lie in the first tile only, without overlap
-        corner = model.patches(x[:, :, :64, :64])
-    assert torch.allclose(side_by_side[0][:, :, :4, :4], corner, atol=1e-5)
-
+def test_pool():
+    """The image logit is the mean of the top 5 % patch logits, in float32."""
+    model = Detector("tiny", layers=(0, 1), head_dim=16, topk=0.05)
     hot = torch.zeros(1, 1, 100, 100)
     hot.view(-1)[:50] = 1.0  # 10 000 patches, 50 of them generated
     assert model.pool(hot).item() == pytest.approx(50 / 500)  # 5 % of all patches, as in training
@@ -194,7 +173,7 @@ def test_tiles_and_pool():
 
 
 def test_test_views(tmp_path):
-    """Test images are never cropped beyond the patch grid and never resized; the mask follows the image."""
+    """Test images are resized whole, nothing is cut off; the mask follows the image."""
     image = np.full((500, 700, 3), 128, np.uint8)
     image[:, 650:] = (255, 0, 0)  # a region at the far right edge must stay in view
     mask = np.zeros((500, 700), np.uint8)
@@ -202,8 +181,8 @@ def test_test_views(tmp_path):
     Image.fromarray(image).save(tmp_path / "wide.png")
     Image.fromarray(mask).save(tmp_path / "wide_mask.png")
     items = [{"path": str(tmp_path / "wide.png"), "label": 1, "mask": str(tmp_path / "wide_mask.png")}]
-    item = ImageDataset(items, 16)[0]
-    assert item["image"].shape == (3, 496, 688) and item["mask"].shape == (1, 496, 688)
+    item = ImageDataset(items, 256)[0]
+    assert item["image"].shape == (3, 256, 256) and item["mask"].shape == (1, 256, 256)
     red, region = item["image"][0] - item["image"][1], item["mask"][0] > 0.5
     assert region.any() and red[region].mean() > 0.6 and red[~region].mean() < 0.2
 
@@ -250,7 +229,7 @@ def test_sid_names_unique(tmp_path, monkeypatch):
 
 def test_scripts_end_to_end(tmp_path):
     """download_data.py, run_train.py, run_test.py and the predict notebook on a tiny model and tiny data,
-    as on the server: whole images, tiles at test, SID edits with masks in training."""
+    as on the server: whole images resized, SID edits with masks in training."""
     import subprocess
     import sys
 
@@ -287,7 +266,7 @@ def test_scripts_end_to_end(tmp_path):
                     "test": {"n_real": 10, "real_sources": ["docci"], "n_per_model": 10},
                     "sid_train": {"n_per_class": 3}, "sid": {"n_per_class": 3}, "n_render": 8},
            "model": {"backbone": "tiny", "layers": [0, 1], "head_dim": 16, "topk": 0.05},
-           "train": {"size": 128, "down_p": 0.3, "samples_per_epoch": 16, "epochs": 2,
+           "train": {"size": 128, "crop_p": 0.5, "samples_per_epoch": 16, "epochs": 2,
                      "balance_floor": 5000, "batch_size": 4, "val_size": 4, "lr": 1e-3, "weight_decay": 0.0,
                      "num_workers": 0, "device": "cpu", "out": "runs/pilot"},
            "test": {"alpha": 0.1, "max_calib": 6}}

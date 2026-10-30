@@ -10,20 +10,19 @@ from .model import Detector
 
 
 @torch.no_grad()
-def score(model: Detector, dataset, device: str, tile: int = 512, workers: int = 4):
-    """Image scores and pixel F1 of the patch map (NaN where there is no mask). Whole images, one at a time;
-    large ones are looked at tile by tile (Detector.full), so no part of an image is left out."""
+def score(model: Detector, dataset, device: str, batch_size: int = 32, workers: int = 4):
+    """Image scores and pixel F1 of the patch map stretched to the mask (NaN where there is no mask)."""
     model.eval().to(device)
-    scores, f1 = np.zeros(len(dataset)), np.full(len(dataset), np.nan)
-    for i, item in enumerate(DataLoader(dataset, batch_size=1, num_workers=workers)):
+    scores, f1 = [], []
+    for batch in DataLoader(dataset, batch_size=batch_size, num_workers=workers):
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device == "cuda"):
-            patch_logits, image_logit = model.full(item["image"].to(device), tile)
-        scores[i] = torch.sigmoid(image_logit.float()).item()
-        if item["has_mask"].item():
-            mask = item["mask"].to(device) > 0.5
-            pred = F.interpolate(patch_logits.float(), size=mask.shape[-2:], mode="bilinear").sigmoid() > 0.5
-            f1[i] = (2 * (pred & mask).sum() / (pred.sum() + mask.sum()).clamp(min=1)).item()
-    return scores, f1
+            patch_logits, image_logit = model(batch["image"].to(device))
+        scores.append(torch.sigmoid(image_logit.float()).cpu())
+        mask = batch["mask"].to(device).flatten(1) > 0.5
+        pred = F.interpolate(patch_logits.float(), size=batch["mask"].shape[-2:], mode="bilinear").sigmoid().flatten(1) > 0.5
+        hit = 2 * (pred & mask).sum(1) / (pred.sum(1) + mask.sum(1)).clamp(min=1)
+        f1.append(torch.where(batch["has_mask"], hit.cpu(), torch.nan))
+    return torch.cat(scores).double().numpy(), torch.cat(f1).double().numpy()
 
 
 def threshold_at(calib_real_scores: np.ndarray, alpha: float) -> float:
