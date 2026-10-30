@@ -264,7 +264,7 @@ def test_scripts_end_to_end(tmp_path):
 
     cfg = {"data": {"dir": "data", "workers": 1, "train": {"n_real": None, "n_per_model": None},
                     "test": {"n_real": 10, "real_sources": ["docci"], "n_per_model": 10},
-                    "sid_train": {"n_per_class": 3}, "sid": {"n_per_class": 3}, "n_render": 8},
+                    "sid_train": {"n_per_class": 3}, "sid": {"n_per_class": 3}, "n_render": 8, "render_train": 0.25},
            "model": {"backbone": "tiny", "layers": [0, 1], "head_dim": 16, "topk": 0.05},
            "train": {"size": 128, "crop_p": 0.5, "samples_per_epoch": 16, "epochs": 2,
                      "balance_floor": 5000, "batch_size": 4, "val_size": 4, "lr": 1e-3, "weight_decay": 0.0,
@@ -282,9 +282,12 @@ def test_scripts_end_to_end(tmp_path):
     run("download_data.py")  # everything is cached: nothing is downloaded
     train_log = run("run_train.py")
     assert "with masks" in train_log and "best.pt: epoch" in train_log
+    assert "incl. 3 renders" in train_log  # 15 reals, 2 for calibration, a quarter of the other 13 drawn
+    assert len(list((data / "renders").glob("train_*"))) == 3  # training fonts, apart from the test renders
     calibration = json.loads((tmp_path / "runs" / "pilot" / "calibration.json").read_text())
     train_paths = {r["path"] for name in ("openfake_train", "sid_train") for r in load_rows(data / f"{name}.csv")}
     assert set(calibration["reals"]) <= train_paths and len(calibration["renders"]) == 4
+    assert all(Path(p).name.startswith("test_") for p in calibration["renders"] + calibration["renders_test"])
     run("run_test.py")
     report_md = (tmp_path / "runs" / "pilot" / "report.md").read_text()
     assert report_md.startswith("threshold ") and "protocol" not in report_md

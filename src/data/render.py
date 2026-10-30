@@ -1,8 +1,10 @@
 """Real non-photo images made by code: text pages, UI screens, charts, logos.
 
-No neural network touches these pixels, so they are real. They are used for calibration and to
-measure false positives where the product hurts most (screenshots, documents, logos), not for
-training: without generated counterparts they would teach "graphics = real". Fonts ship with matplotlib.
+No neural network touches these pixels, so they are real. The "train" split is a small share of the
+training reals, against false positives where the product hurts most (screenshots, documents, logos);
+the price: without generated counterparts they push towards "graphics = real", so generated logos and
+infographics are caught less. The "test" split, with other fonts, is used for calibration and to measure
+those false positives. Fonts ship with matplotlib.
 """
 
 import io

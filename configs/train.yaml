@@ -61,6 +61,8 @@ data:
   sid:                      # SID_Set validation: the test of local edits
     n_per_class: 1000
   n_render: 1000            # rendered text / UI / charts / logos: half for calibration, half for FPR test
+  render_train: 0.05        # more of them (other fonts) as training reals: this share of the training reals (~13k,
+                            #   ~10 min to draw once, ~1.2 GB): fewer false positives on screenshots, documents, logos
 
 model:
   backbone: vit_large_patch16_dinov3.lvd1689m   # timm, no access request; faster: vit_base_patch16_dinov3.lvd1689m

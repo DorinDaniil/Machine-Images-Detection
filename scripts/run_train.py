@@ -1,7 +1,8 @@
 """python scripts/run_train.py --config configs/train.yaml [--resume]
 
 OpenFake core/train (reals + generators) and SID_Set train (reals, fully synthetic and locally edited images
-with masks) -> 15 % of the reals kept apart for calibration -> generator-balanced training of the patch head
+with masks) -> 15 % of the reals kept apart for calibration -> rendered text / UI / charts / logos added to the
+other reals (render_train) -> generator-balanced training of the patch head
 on a frozen DINOv3, whole images resized to size x size, augmented -> runs/pilot/best.pt
 --resume: go on from runs/pilot/state.pt after a crash or Ctrl+C (saved every save_every steps and every epoch)
 """
@@ -39,6 +40,10 @@ random.Random(0).shuffle(rows)
 reals, fakes = [r for r in rows if r["label"] == 0], [r for r in rows if r["label"] == 1]
 n_calib = int(0.15 * len(reals))
 calib, reals = reals[:n_calib], reals[n_calib:]
+n_drawn = round(d.get("render_train", 0.0) * len(reals))  # non-photo reals against false positives on graphics
+print(f"rendering {n_drawn} text pages, UI screens, charts, logos as training reals (once, then from disk)")
+reals += [{"path": str(it["path"]), "label": 0, "generator": "", "mask": "", "source": f"render/{it['content']}"}
+          for it in render_folder(data / "renders", n_drawn, "train")]
 
 renders = [str(it["path"]) for it in render_folder(data / "renders", d["n_render"], "test")]
 json.dump({"reals": [r["path"] for r in calib], "renders": renders[: len(renders) // 2],
@@ -51,7 +56,8 @@ train_set = TrainDataset(pool[n_val:], t["size"], seed=0, crop_p=t.get("crop_p",
 val_set = TrainDataset(pool[:n_val], t["size"], seed=1, train=False)  # whole images, resized, as in testing
 generators = sorted({r["generator"] for r in fakes})
 masked = sum(bool(r.get("mask")) for r in fakes)
-print(f"train {len(train_set)} images ({len(reals)} reals, {len(generators)} generators, {masked} with masks), "
+print(f"train {len(train_set)} images ({len(reals)} reals incl. {n_drawn} renders, {len(generators)} generators, "
+      f"{masked} with masks), "
       f"val {len(val_set)}, calibration {len(calib)} reals; whole images resized to {t['size']} x {t['size']}, "
       f"batch {t['batch_size']}")
 
