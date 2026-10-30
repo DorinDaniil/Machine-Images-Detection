@@ -1,6 +1,6 @@
 """python scripts/run_test.py --config configs/train.yaml
 
-Whole images: nothing is cropped; large images are looked at tile by tile (Detector.full).
+Whole images: nothing is cropped; images larger than the training views are looked at in tiles of that size.
 Threshold: exceeded by alpha of the calibration reals (held-out train reals + renders), never by test images.
 Tests:
     OpenFake core/test   newer generators against DOCCI reals; generators also seen in training are marked
@@ -48,7 +48,7 @@ sid_rows = sid_set("validation", data / "sid_validation", **d["sid"])
 tables = []
 for protocol in test["protocols"]:
     def run(rows):
-        return score(model, ImageDataset(rows, model.patch_size, protocol), device, t["max_side"], t["num_workers"])
+        return score(model, ImageDataset(rows, model.patch_size, protocol), device, t["size"], t["num_workers"])
 
     thr = threshold_at(run(calib)[0], test["alpha"])
     docci, _ = run([r for r in openfake_rows if r["label"] == 0])

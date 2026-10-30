@@ -46,7 +46,7 @@ class Detector(nn.Module):
         return patch_logits, self.pool(patch_logits)
 
     @torch.no_grad()
-    def full(self, x: torch.Tensor, tile: int = 1024):
+    def full(self, x: torch.Tensor, tile: int = 512):
         """A whole image, nothing cropped or resized: cut into nearly equal tiles of at most tile x tile on the
         patch grid, each tile through the model, the patch logits stitched back into one map, then pooled."""
         p, m = self.patch_size, tile // self.patch_size

@@ -1,6 +1,6 @@
-# Real images vs images of many open and API generators (OpenFake), frozen DINOv3 + patch head, whole images
-# at their own resolution; locally edited images with masks (SID_Set train) can be added below.
-# Test on newer generators, other real sources, local edits and non-photo reals, whole images.
+# Real images vs images of many open and API generators (OpenFake), frozen DINOv3 + patch head, trained on
+# 512 x 512 views at the images' own resolution; locally edited images with masks (SID_Set train) can be added.
+# Test on newer generators, other real sources, local edits and non-photo reals: whole images in 512 tiles.
 # Data: 300k reals, up to 10k images of each of 36 generators; 3.3 TB downloaded, ~0.6 TB kept.
 
 data:
@@ -69,21 +69,20 @@ model:
   topk: 0.05                # image score = mean of the top 5 % patch logits
 
 train:
-  max_side: 1024            # whole images at their own resolution, never resized. A longer side is cut by a random
-                            #   crop to fit memory (only large photos). The test looks at large images tile by tile
-  crop_p: 0.5               # augmentation: a random part of the image, each side 40-100 % (at least 256 px)
-  down_p: 0.3               # augmentation: downscaled by 0.5-1 and kept smaller, as images shared online
-                            #   further, for every image (src/data/dataset.py): one JPEG pass first if not stored
-                            #   as JPEG; a 0-7 px shift; flip; resampling 20 %, blur 10 %, noise 20 %; JPEG q60-95
-                            #   or WebP (20 %), a second JPEG 25 %
+  size: 512                 # training views: a random 512 x 512 crop at the image's own resolution, never resized
+                            #   (DINOv3 adapted to high resolution on 512-768 crops); the test scores whole images
+                            #   in tiles of this size
+  down_p: 0.3               # augmentation before the crop: downscaled by 0.5-1 (short side stays >= size), as images
+                            #   shared online. Further (src/data/dataset.py): one JPEG pass first if the file is not a
+                            #   JPEG; after the crop: flip; resampling 20 %, blur 10 %, noise 20 %; JPEG q60-95 or
+                            #   WebP (20 %), a second JPEG 25 %
   samples_per_epoch: null   # balanced draws per epoch, then validation and a checkpoint; null: the size of the
-                            #   train set (~560k images, ~6 h on one GPU at ~25 images/s)
+                            #   train set (~585k images)
   epochs: 5
   balance_floor: 5000       # a generator with fewer images weighs in proportion to its size, the rest equally
-  batch_size: 32            # images per optimizer step, as before; sizes differ, so they go through the model one
-                            #   by one and the gradient of 32 images is accumulated
+  batch_size: 32            # images per batch and optimizer step
   val_size: 5000            # images held out for validation; best.pt = epoch with the lowest validation loss
-  save_every: 1000          # optimizer steps between saves of the training state (~20 min); --resume goes on from it
+  save_every: 1000          # optimizer steps (32k images) between saves of the training state; --resume goes on from it
   lr: 3.0e-4
   weight_decay: 0.05
   num_workers: 8

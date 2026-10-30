@@ -1,13 +1,14 @@
-"""TrainDataset: real and generated images with optional masks of generated regions.
-ImageDataset: the same for testing, under a fixed protocol.
+"""TrainDataset: fixed-size views of real and generated images, with optional masks of generated regions.
+ImageDataset: whole images for testing, under a fixed protocol.
 
-Images are used whole at their own resolution. Every image is treated by the same random rules whatever its
-label, so the only thing that differs between the classes is how the pixels were made. Files on disk are
-untouched originals: fakes mostly PNG, reals mostly JPEG. So an image that is not stored as JPEG is first
-JPEG-compressed once (random quality in training, q90 in testing), as if it had been published before: both
-classes then have a compression history, and compressing again later leaves double-compression traces in
-both. Every image is then compressed once more (random JPEG / WebP in training, JPEG q90 in testing). In
-training a random 0-7 px shift keeps the 8 x 8 JPEG grids of the two compressions from always lining up.
+Pixels are never resized to fit the model: a training view is a size x size crop at the image's own resolution
+(only the downscale augmentation changes the scale), a test image is used whole and scored tile by tile.
+Every image is treated by the same random rules whatever its label, so the only thing that differs between the
+classes is how the pixels were made. Files on disk are untouched originals: fakes mostly PNG, reals mostly
+JPEG. So an image that is not stored as JPEG is first JPEG-compressed once (random quality in training, q90 in
+testing), as if it had been published before: both classes then have a compression history. Every image is
+then compressed once more (random JPEG / WebP in training, JPEG q90 in testing). In training the random crop
+puts the 8 x 8 grids of the two compressions at a random offset.
 """
 
 import io
@@ -76,58 +77,56 @@ def to_grid(image: Image.Image, patch: int) -> Image.Image:
 
 
 class TrainDataset(Dataset):
-    """rows: dicts with "path", "label" (0 real, 1 generated) and "mask" (path or empty).
+    """rows: dicts with "path", "label" (0 real, 1 generated) and "mask" (path or empty). Every item is a
+    size x size view, so images are batched as usual.
 
-    View: the whole image at its own resolution, first JPEG-compressed once if not stored as JPEG (see the
-    module docstring) and shifted by a random 0-7 px. Augmentations, same for both classes:
-      crop_p  a random part of the image, each side 40-100 % (at least 256 px), never resized;
-      down_p  the view downscaled by 0.5-1 and kept smaller (at least 256 px), as images shared online;
-      a horizontal flip; then `degrade`: resampling, blur, noise, JPEG / WebP compression.
-    Two cuts that are not augmentation: a side above max_side is cut to max_side by a random crop (memory;
-    only large photos reach it, and a crop of a real photo is still real, of a mask still its mask) and both
-    sides are cut to the patch grid.
+    train=True, in this order:
+      read             one JPEG pass first if the file is not a JPEG (see the module docstring);
+      down_p           augmentation before the crop: the image downscaled by 0.5-1, its short side kept >= size,
+                       as images shared online;
+      crop             a random size x size crop at that resolution: the fixed view, never resized;
+      flip             horizontal, half of the views;
+      degrade          resampling, blur, noise, then JPEG / WebP compression, always.
+    train=False (validation): the centre size x size crop and JPEG q90, as in testing.
     Target map: the mask if the image has one (only that region is generated), else the label everywhere;
-    it goes through the same crop, resize and flip as the image.
-    Sizes differ from image to image, so the loader gives one image at a time (see train.py).
+    it goes through the same resize, crop and flip as the image.
     """
 
-    def __init__(self, rows: list[dict], max_side: int = 1024, patch: int = 16, seed: int = 0,
-                 crop_p: float = 0.5, down_p: float = 0.3):
-        self.rows, self.max_side, self.patch, self.seed = rows, max_side, patch, seed
-        self.crop_p, self.down_p, self.epoch = crop_p, down_p, 0
+    def __init__(self, rows: list[dict], size: int = 512, seed: int = 0, down_p: float = 0.3, train: bool = True):
+        self.rows, self.size, self.seed, self.down_p, self.train, self.epoch = rows, size, seed, down_p, train, 0
 
     def __len__(self):
         return len(self.rows)
 
     def __getitem__(self, i):
         rng = np.random.default_rng([self.seed, self.epoch, i])
-        row = self.rows[i]
-        image = load(row["path"], rng)
+        row, size = self.rows[i], self.size
+        image = load(row["path"], rng if self.train else None)
         if row.get("mask"):
             with Image.open(row["mask"]) as m:
                 target = m.convert("L").resize(image.size, Image.NEAREST)
         else:
             target = Image.new("L", image.size, 255 * int(row["label"]))
-        dx, dy = (int(v) for v in rng.integers(0, 8, 2))  # the JPEG grid at a random offset
-        box = (dx, dy, image.width, image.height)
-        image, target = image.crop(box), target.crop(box)
 
-        w, h = min(image.width, self.max_side), min(image.height, self.max_side)
-        if rng.random() < self.crop_p:
-            w = int(rng.uniform(min(w, max(256, 0.4 * w)), w + 1))
-            h = int(rng.uniform(min(h, max(256, 0.4 * h)), h + 1))
-        x, y = int(rng.integers(0, image.width - w + 1)), int(rng.integers(0, image.height - h + 1))
-        image, target = image.crop((x, y, x + w, y + h)), target.crop((x, y, x + w, y + h))
-        if rng.random() < self.down_p:
-            s = rng.uniform(0.5, 1.0)
-            size = (min(w, max(256, round(w * s))), min(h, max(256, round(h * s))))
-            image, target = image.resize(size, RESAMPLE[rng.integers(3)]), target.resize(size, Image.NEAREST)
-        if rng.random() < 0.5:
+        short = min(image.size)
+        s = size / short if short < size else 1.0  # smaller images are skipped at download; this is a guard
+        if self.train and rng.random() < self.down_p:
+            s = rng.uniform(max(0.5, size / short), 1.0)
+        if s != 1.0:
+            new = (max(size, round(image.width * s)), max(size, round(image.height * s)))
+            image, target = image.resize(new, RESAMPLE[rng.integers(3)]), target.resize(new, Image.NEAREST)
+
+        if self.train:
+            x, y = int(rng.integers(0, image.width - size + 1)), int(rng.integers(0, image.height - size + 1))
+        else:
+            x, y = (image.width - size) // 2, (image.height - size) // 2
+        image, target = image.crop((x, y, x + size, y + size)), target.crop((x, y, x + size, y + size))
+        if self.train and rng.random() < 0.5:
             image, target = image.transpose(Image.FLIP_LEFT_RIGHT), target.transpose(Image.FLIP_LEFT_RIGHT)
-        image, target = to_grid(image, self.patch), to_grid(target, self.patch)
+        image = degrade(image, rng) if self.train else compress(image, "JPEG", 90)
 
         target = torch.from_numpy(np.array(target, dtype=np.float32) / 255)[None]
-        return {"image": to_tensor(degrade(image, rng)), "target": target, "label": float(row["label"])}
+        return {"image": to_tensor(image), "target": target, "label": float(row["label"])}
 
 
 class ImageDataset(Dataset):

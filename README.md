@@ -2,7 +2,8 @@
 
 Detection of generated and partly generated images. A frozen DINOv3 with a small head scores every
 patch; the image score is the mean of the top 5 % patches, so a small edited region still counts.
-Images are used whole at their own resolution: large ones are scored tile by tile, nothing is cropped.
+Training views are 512 x 512 crops at the images' own resolution; the test scores whole images in 512
+tiles, so nothing is resized to fit the model and no part of a test image is left out.
 
 Training data is simply real images and images of many generators (OpenFake: SD 1.x to FLUX.2,
 GPT-Image-1, Imagen 4, Midjourney 6 and ~70 others); locally edited images with masks (SID_Set) can be added.
@@ -34,10 +35,10 @@ python scripts/run_test.py --config configs/train.yaml
   models (list in the config); SID_Set train with locally edited images and their masks is off by
   default (`sid_train.n_per_class`); 15 % of the reals are kept apart for calibration; every row
   of the data CSV keeps the OpenFake prompt, prompt kind and row id;
-- views: whole images at their own resolution, never resized (a side above 1024 is cut to fit memory);
-  an image not stored as JPEG is JPEG-compressed once first, so both classes have a compression
-  history; augmentations on both classes alike: a random part of the image, a downscale, a 0-7 px
-  shift, a flip, resampling, blur, noise, JPEG or WebP compression (probabilities in the config);
+- views: an image not stored as JPEG is JPEG-compressed once first, so both classes have a compression
+  history; a random downscale (augmentation), then a random 512 x 512 crop at that resolution, then a
+  flip, resampling, blur, noise, JPEG or WebP compression, on both classes alike (probabilities in the
+  config); batches of 32;
 - training log: accuracy, precision, recall, F1 and FPR of every epoch (train and validation) in
   `runs/pilot/metrics.csv`; `best.pt` is the epoch with the lowest validation loss;
 - threshold: 1 % false positives on the calibration reals and on rendered text, UI, charts, logos;
@@ -47,12 +48,12 @@ python scripts/run_test.py --config configs/train.yaml
     generators that also appear in training are marked;
   - SID_Set validation: fully synthetic and locally edited images (pixel F1 from masks) vs SID reals;
   - rendered non-photo images: measured false positives;
-- protocols: `native` (own resolution, as in training) and `equalized` (every image resized to the same
+- protocols: `native` (whole image at its own resolution, in 512 tiles) and `equalized` (every image resized to the same
   area, a check for size shortcuts); both JPEG q90, like training;
 - result: `runs/pilot/report.md`.
 
 Downloads 3.3 TB (each file deleted once its images are taken) and keeps ~0.6 TB. Training: one GPU,
-5 epochs over the whole train set, about 6 hours each. Generators, caps, files, augmentations: in the config.
+5 epochs over the whole train set. Generators, caps, files, augmentations: in the config.
 
 ## Layout
 

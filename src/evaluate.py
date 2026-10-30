@@ -10,7 +10,7 @@ from .model import Detector
 
 
 @torch.no_grad()
-def score(model: Detector, dataset, device: str, tile: int = 1024, workers: int = 4):
+def score(model: Detector, dataset, device: str, tile: int = 512, workers: int = 4):
     """Image scores and pixel F1 of the patch map (NaN where there is no mask). Whole images, one at a time;
     large ones are looked at tile by tile (Detector.full), so no part of an image is left out."""
     model.eval().to(device)

@@ -2,7 +2,7 @@
 
 OpenFake core/train (reals + generators) and SID_Set train (reals, fully synthetic and locally edited images
 with masks) -> 15 % of the reals kept apart for calibration -> generator-balanced training of the patch head
-on a frozen DINOv3, whole images with augmentations -> runs/pilot/best.pt
+on a frozen DINOv3, size x size views at the images' own resolution, augmented -> runs/pilot/best.pt
 --resume: go on from runs/pilot/state.pt after a crash or Ctrl+C (saved every save_every steps and every epoch)
 """
 
@@ -47,14 +47,13 @@ json.dump({"reals": [r["path"] for r in calib], "renders": renders[: len(renders
 pool = reals + fakes
 random.Random(1).shuffle(pool)
 n_val = min(t.get("val_size", 5000), max(2, len(pool) // 20))
-augment = {"crop_p": t.get("crop_p", 0.5), "down_p": t.get("down_p", 0.3)}
-train_set = TrainDataset(pool[n_val:], t["max_side"], model.patch_size, seed=0, **augment)
-val_set = TrainDataset(pool[:n_val], t["max_side"], model.patch_size, seed=1, crop_p=0, down_p=0)  # whole images
+train_set = TrainDataset(pool[n_val:], t["size"], seed=0, down_p=t.get("down_p", 0.3))
+val_set = TrainDataset(pool[:n_val], t["size"], seed=1, train=False)  # centre crops, JPEG q90, as in testing
 generators = sorted({r["generator"] for r in fakes})
 masked = sum(bool(r.get("mask")) for r in fakes)
 print(f"train {len(train_set)} images ({len(reals)} reals, {len(generators)} generators, {masked} with masks), "
-      f"val {len(val_set)}, calibration {len(calib)} reals; whole images, crop {augment['crop_p']:.0%}, "
-      f"downscale {augment['down_p']:.0%}")
+      f"val {len(val_set)}, calibration {len(calib)} reals; {t['size']} x {t['size']} views at the own resolution, "
+      f"batch {t['batch_size']}")
 
 best = train(model, train_set, val_set, t, resume=args.resume)
 print(f"best checkpoint: {best}")

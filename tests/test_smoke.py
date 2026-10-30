@@ -48,10 +48,10 @@ def test_pipeline(tmp_path):
     assert abs(sum(w) - 0.5) < 1e-9 and abs(w[0] - 1 / 12) < 1e-9 and abs(w[4] - 1 / 6) < 1e-9
 
     model = Detector("tiny", layers=(0, 1), head_dim=16, topk=0.1)
-    item = TrainDataset(rows, crop_p=0, down_p=0)[1]
-    assert item["image"].shape == (3, 192, 192) and 0 < item["target"].mean() < 1  # masked image: partial target
+    item = TrainDataset(rows, 160, train=False)[1]
+    assert item["image"].shape == (3, 160, 160) and 0 < item["target"].mean() < 1  # masked image: partial target
     patch_logits, image_logit = model(item["image"][None])
-    assert patch_logits.shape == (1, 1, 12, 12) and image_logit.shape == (1,)
+    assert patch_logits.shape == (1, 1, 10, 10) and image_logit.shape == (1,)
     patch_loss(patch_logits, image_logit, item["target"][None]).backward()
 
     m = BinaryMetrics(0.5)
@@ -59,7 +59,7 @@ def test_pipeline(tmp_path):
     assert m.summary() == {"acc": 0.5, "prec": 0.5, "rec": 0.5, "f1": 0.5, "fpr": 0.5}
 
     cfg = dict(device="cpu", out=str(tmp_path / "run"), batch_size=2, num_workers=0, lr=1e-3, weight_decay=0.0, epochs=2)
-    best = train(model, TrainDataset(rows[2:]), TrainDataset(rows[:4], seed=1, crop_p=0, down_p=0), cfg)
+    best = train(model, TrainDataset(rows[2:], 160), TrainDataset(rows[:4], 160, seed=1, train=False), cfg)
     log = (tmp_path / "run" / "metrics.csv").read_text().splitlines()
     val_loss = [float(line.split(",")[log[0].split(",").index("val_loss")]) for line in log[1:]]
     assert len(val_loss) == 2 and best.exists()
@@ -95,15 +95,15 @@ def test_train_resume(tmp_path):
     rows = make_rows(tmp_path)
     cfg = dict(device="cpu", out=str(tmp_path / "run"), batch_size=2, num_workers=0, lr=1e-3, weight_decay=0.0,
                epochs=2, samples_per_epoch=8, save_every=1)
-    val = TrainDataset(rows[:4], seed=1, crop_p=0, down_p=0)
-    with pytest.raises(RuntimeError, match="power cut"):
-        train(Detector("tiny", layers=(0, 1), head_dim=16), Crash(rows[2:], at=13), val, cfg)  # 8 images, then the 5th
+    val = TrainDataset(rows[:4], 160, seed=1, train=False)
+    with pytest.raises(RuntimeError, match="power cut"):  # 8 images, then the 5th of epoch 2 (in its 3rd batch)
+        train(Detector("tiny", layers=(0, 1), head_dim=16), Crash(rows[2:], at=13, size=160), val, cfg)
     state = torch.load(tmp_path / "run" / "state.pt", weights_only=False)
     assert state["epoch"] == 2 and state["progress"]["n"] == 4 and len(state["log"]) == 1
     assert state["scheduler"]["last_epoch"] == 6  # 4 steps of epoch 1, 2 of epoch 2
 
     resumed = Detector("tiny", layers=(0, 1), head_dim=16)  # as a new process: weights come from the state
-    train(resumed, TrainDataset(rows[2:]), val, cfg, resume=True)
+    train(resumed, TrainDataset(rows[2:], 160), val, cfg, resume=True)
     state = torch.load(tmp_path / "run" / "state.pt", weights_only=False)
     assert state["epoch"] == 3 and state["progress"] is None and state["scheduler"]["last_epoch"] == 8
     epochs = [line.split(",")[0] for line in (tmp_path / "run" / "metrics.csv").read_text().splitlines()[1:]]
@@ -112,31 +112,35 @@ def test_train_resume(tmp_path):
 
 
 def test_train_views(tmp_path):
-    """Whole images at their own size; the memory cut, the crop and the downscale stay in their ranges;
-    targets follow the label; nothing is ever enlarged."""
+    """Every view is size x size at the image's own resolution: the pixels are not resized unless the downscale
+    augmentation says so, and then the short side stays >= size; validation views are fixed; targets follow the label."""
     rows = make_rows(tmp_path)
-    for i in range(2, 8):  # own size: at most a 0-7 px shift and the patch grid less, never enlarged
-        h, w = TrainDataset(rows, crop_p=0, down_p=0)[i]["image"].shape[1:]
-        w0, h0 = Image.open(rows[i]["path"]).size
-        assert h % 16 == 0 == w % 16 and h0 - 22 <= h <= h0 and w0 - 22 <= w <= w0, (i, h, w)
-    assert TrainDataset(rows, max_side=160, crop_p=0, down_p=0)[2]["image"].shape == (3, 160, 160)  # memory cut
-    real, fake = TrainDataset(rows, crop_p=0, down_p=0)[0], TrainDataset(rows, crop_p=0, down_p=0)[3]
+    assert all(TrainDataset(rows, 160)[i]["image"].shape == (3, 160, 160) for i in range(8))
+    assert TrainDataset(rows, 256)[0]["image"].shape == (3, 256, 256)  # smaller than the view: enlarged (a guard only)
+    val = TrainDataset(rows, 160, train=False)
+    assert torch.equal(val[2]["image"], val[2]["image"])  # validation views do not change
+    real, fake = val[0], val[3]
     assert real["target"].max() == 0 and fake["target"].min() == 1 and real["label"] == 0 and fake["label"] == 1
 
-    Image.new("RGB", (900, 600), "gray").save(tmp_path / "big.png")
-    for aug in ({"crop_p": 1, "down_p": 0}, {"crop_p": 0, "down_p": 1}, {"crop_p": 1, "down_p": 1}):
-        big = TrainDataset([{"path": str(tmp_path / "big.png"), "label": 0}], **aug)
-        views = set()
-        for big.epoch in range(25):
-            views.add(tuple(big[0]["image"].shape[1:]))
-        assert len(views) > 5, aug  # a different view every epoch
-        assert all(h % 16 == 0 and w % 16 == 0 and 240 <= h <= 592 and 240 <= w <= 896 for h, w in views), (aug, views)
-    big = TrainDataset([{"path": str(tmp_path / "big.png"), "label": 0}], crop_p=0, down_p=1)
-    assert all(big[0]["image"].shape[1] >= 288 for big.epoch in range(25))  # downscale at most by 2
+    stripes = np.zeros((600, 900, 3), np.uint8)
+    stripes[:, (np.arange(900) // 8) % 2 == 1] = 255  # vertical stripes 8 px wide
+    Image.fromarray(stripes).save(tmp_path / "stripes.png")
+
+    def widths(down_p):  # mean stripe width seen in the views: 8 px at the own resolution
+        ds, out = TrainDataset([{"path": str(tmp_path / "stripes.png"), "label": 0}], 256, down_p=down_p), []
+        for ds.epoch in range(20):
+            row = ds[0]["image"][:, 128].mean(0) > 0.5  # one row, bright or dark
+            out.append(256 / (1 + (row[1:] != row[:-1]).sum().item()))
+        return np.array(out)
+
+    native = widths(0.0)
+    assert (abs(native - 8) < 0.6).all(), native  # never resized
+    down = widths(1.0)
+    assert (down < 7.7).mean() > 0.6 and (down > 3.5).all(), down  # downscaled by 0.5-1 (600 px short side: by >= 0.43)
 
 
 def test_augment_alignment(tmp_path):
-    """The target map follows the generated region through crop, downscale and flip."""
+    """The target map follows the generated region through downscale, crop and flip."""
     image = np.full((500, 600, 3), 128, np.uint8)
     image[150:350, 200:450] = (255, 0, 0)
     mask = np.zeros((500, 600), np.uint8)
@@ -144,7 +148,7 @@ def test_augment_alignment(tmp_path):
     Image.fromarray(image).save(tmp_path / "edit.png")
     Image.fromarray(mask).save(tmp_path / "edit_mask.png")
     ds = TrainDataset([{"path": str(tmp_path / "edit.png"), "label": 1, "mask": str(tmp_path / "edit_mask.png")}],
-                      crop_p=1, down_p=1)
+                      256, down_p=0.5)
     checked = 0
     for ds.epoch in range(30):
         item = ds[0]
@@ -277,7 +281,7 @@ def test_scripts_end_to_end(tmp_path):
                     "test": {"n_real": 10, "real_sources": ["docci"], "n_per_model": 10},
                     "sid_train": {"n_per_class": 3}, "sid": {"n_per_class": 3}, "n_render": 8},
            "model": {"backbone": "tiny", "layers": [0, 1], "head_dim": 16, "topk": 0.05},
-           "train": {"max_side": 128, "crop_p": 0.5, "down_p": 0.3, "samples_per_epoch": 16, "epochs": 2,
+           "train": {"size": 128, "down_p": 0.3, "samples_per_epoch": 16, "epochs": 2,
                      "balance_floor": 5000, "batch_size": 4, "val_size": 4, "lr": 1e-3, "weight_decay": 0.0,
                      "num_workers": 0, "device": "cpu", "out": "runs/pilot"},
            "test": {"alpha": 0.1, "max_calib": 6, "protocols": ["native", "equalized"]}}
