@@ -67,13 +67,12 @@ def test_pipeline(tmp_path):
     same = all(torch.equal(a, b) for a, b in zip(best_model.head.state_dict().values(), last_model.head.state_dict().values()))
     assert same == (val_loss[1] <= val_loss[0])  # best.pt = the epoch with the lowest validation loss
 
-    for protocol in ("native", "equalized"):
-        reals = [r for r in rows if r["label"] == 0]
-        real_scores, _ = score(best_model, ImageDataset(reals, best_model.patch_size, protocol), "cpu", tile=64, workers=0)
-        fake_scores, f1 = score(best_model, ImageDataset(rows[1:2], best_model.patch_size, protocol), "cpu", tile=64, workers=0)
-        assert np.isfinite(f1).all() and ((0 < real_scores) & (real_scores < 1)).all()
-        thr = threshold_at(real_scores[:2], 0.5)
-        assert "| edit |" in report(thr, {"reals": real_scores[2:]}, [("edit", real_scores, fake_scores, f1)])
+    reals = [r for r in rows if r["label"] == 0]
+    real_scores, _ = score(best_model, ImageDataset(reals, best_model.patch_size), "cpu", tile=64, workers=0)
+    fake_scores, f1 = score(best_model, ImageDataset(rows[1:2], best_model.patch_size), "cpu", tile=64, workers=0)
+    assert np.isfinite(f1).all() and ((0 < real_scores) & (real_scores < 1)).all()
+    thr = threshold_at(real_scores[:2], 0.5)
+    assert "| edit |" in report(thr, {"reals": real_scores[2:]}, [("edit", real_scores, fake_scores, f1)])
 
 
 class Crash(TrainDataset):
@@ -162,19 +161,31 @@ def test_augment_alignment(tmp_path):
 
 
 def test_tiles_and_pool():
-    """One tile is the plain forward pass; tiles are stitched into the whole patch map; top-k is capped."""
+    """An image no larger than a tile is the plain forward pass; larger ones are covered by tiles of exactly the
+    tile size, stitched (and averaged where they overlap) into the whole patch map; top-k of all patches."""
     torch.manual_seed(0)
     model = Detector("tiny", layers=(0, 1), head_dim=16, topk=0.05).eval()
     x = torch.rand(1, 3, 160, 208)
     with torch.no_grad():
         plain = model(x)
-    whole = model.full(x, tile=1024)
+    whole = model.full(x, tile=512)
     assert torch.allclose(plain[0], whole[0], atol=1e-5) and torch.allclose(plain[1], whole[1], atol=1e-5)
-    patch_logits, image_logit = model.full(x, tile=64)
-    assert patch_logits.shape == (1, 1, 10, 13) and image_logit.shape == (1,)
-    with torch.no_grad():  # the first tile of a 64-px tiling is the top-left 48 x 48 (10 x 13 patches cut evenly)
-        corner = model.patches(x[:, :, :48, :48])
-    assert torch.allclose(patch_logits[:, :, :3, :3], corner, atol=1e-5)
+
+    seen = []
+    patches = model.patches
+    model.patches = lambda t: (seen.append(tuple(t.shape[2:])), patches(t))[1]  # record every tile
+    side_by_side = model.full(x, tile=64)
+    tiles_side = list(seen)
+    seen.clear()
+    overlapping = model.full(x, tile=64, step=32)
+    model.patches = patches
+    assert set(tiles_side) == set(seen) == {(64, 64)}  # every tile has the training view size
+    assert len(tiles_side) == 3 * 4 and len(seen) == 4 * 6  # 10 x 13 patches: starts 0, 4, 6 and 0, 4, 8, 9 / step 2
+    for patch_logits, image_logit in (side_by_side, overlapping):
+        assert patch_logits.shape == (1, 1, 10, 13) and image_logit.shape == (1,) and torch.isfinite(patch_logits).all()
+    with torch.no_grad():  # the top-left 4 x 4 patches lie in the first tile only, without overlap
+        corner = model.patches(x[:, :, :64, :64])
+    assert torch.allclose(side_by_side[0][:, :, :4, :4], corner, atol=1e-5)
 
     hot = torch.zeros(1, 1, 100, 100)
     hot.view(-1)[:50] = 1.0  # 10 000 patches, 50 of them generated
@@ -183,8 +194,7 @@ def test_tiles_and_pool():
 
 
 def test_test_views(tmp_path):
-    """Test images are never cropped beyond the patch grid; equalized keeps the whole image at a fixed area;
-    the mask follows the image."""
+    """Test images are never cropped beyond the patch grid and never resized; the mask follows the image."""
     image = np.full((500, 700, 3), 128, np.uint8)
     image[:, 650:] = (255, 0, 0)  # a region at the far right edge must stay in view
     mask = np.zeros((500, 700), np.uint8)
@@ -192,14 +202,10 @@ def test_test_views(tmp_path):
     Image.fromarray(image).save(tmp_path / "wide.png")
     Image.fromarray(mask).save(tmp_path / "wide_mask.png")
     items = [{"path": str(tmp_path / "wide.png"), "label": 1, "mask": str(tmp_path / "wide_mask.png")}]
-    native = ImageDataset(items, 16, "native")[0]
-    assert native["image"].shape == (3, 496, 688) and native["mask"].shape == (1, 496, 688)
-    equalized = ImageDataset(items, 16, "equalized")[0]
-    h, w = equalized["image"].shape[1:]
-    assert abs(h * w - 512 * 512) < 0.05 * 512 * 512 and abs(w / h - 700 / 500) < 0.05 and h % 16 == 0 == w % 16
-    for item in (native, equalized):
-        red, region = item["image"][0] - item["image"][1], item["mask"][0] > 0.5
-        assert region.any() and red[region].mean() > 0.6 and red[~region].mean() < 0.2
+    item = ImageDataset(items, 16)[0]
+    assert item["image"].shape == (3, 496, 688) and item["mask"].shape == (1, 496, 688)
+    red, region = item["image"][0] - item["image"][1], item["mask"][0] > 0.5
+    assert region.any() and red[region].mean() > 0.6 and red[~region].mean() < 0.2
 
 
 def test_compression_history(tmp_path):
@@ -284,7 +290,7 @@ def test_scripts_end_to_end(tmp_path):
            "train": {"size": 128, "down_p": 0.3, "samples_per_epoch": 16, "epochs": 2,
                      "balance_floor": 5000, "batch_size": 4, "val_size": 4, "lr": 1e-3, "weight_decay": 0.0,
                      "num_workers": 0, "device": "cpu", "out": "runs/pilot"},
-           "test": {"alpha": 0.1, "max_calib": 6, "protocols": ["native", "equalized"]}}
+           "test": {"alpha": 0.1, "max_calib": 6}}
     (tmp_path / "tiny.yaml").write_text(yaml.safe_dump(cfg))
 
     def run(script):  # offline: a call to the Hub fails at once instead of downloading
@@ -302,7 +308,7 @@ def test_scripts_end_to_end(tmp_path):
     assert set(calibration["reals"]) <= train_paths and len(calibration["renders"]) == 4
     run("run_test.py")
     report_md = (tmp_path / "runs" / "pilot" / "report.md").read_text()
-    assert report_md.index("## protocol: native") < report_md.index("## protocol: equalized")
+    assert report_md.startswith("threshold ") and "protocol" not in report_md
     assert "| gen-a (in train) |" in report_md and "| gen-new |" in report_md and "| sid-edit (in train) |" in report_md
     assert "calibration reals. unseen OpenFake generators: mean TPR" in report_md
 
@@ -322,7 +328,7 @@ def test_scripts_end_to_end(tmp_path):
                 exec("".join(cell["source"]), ns)
     finally:
         os.chdir(cwd)
-    assert set(ns["thresholds"]) == {"native", "equalized"} and 0 <= ns["prob"] <= 1
+    assert report_md.startswith(f"threshold {ns['threshold']:.4f}") and 0 <= ns["prob"] <= 1
 
 
 def test_store_and_renders(tmp_path):

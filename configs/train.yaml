@@ -92,4 +92,3 @@ train:
 test:
   alpha: 0.01               # target false-positive rate; threshold from calibration reals only
   max_calib: 10000          # calibration reals used (of the 15 % held out): enough for a 1 % threshold
-  protocols: [native, equalized]

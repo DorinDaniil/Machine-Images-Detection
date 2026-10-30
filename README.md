@@ -48,8 +48,7 @@ python scripts/run_test.py --config configs/train.yaml
     generators that also appear in training are marked;
   - SID_Set validation: fully synthetic and locally edited images (pixel F1 from masks) vs SID reals;
   - rendered non-photo images: measured false positives;
-- protocols: `native` (whole image at its own resolution, in 512 tiles) and `equalized` (every image resized to the same
-  area, a check for size shortcuts); both JPEG q90, like training;
+- test images: whole, at their own resolution, in 512 tiles, JPEG q90 like training;
 - result: `runs/pilot/report.md`.
 
 Downloads 3.3 TB (each file deleted once its images are taken) and keeps ~0.6 TB. Training: one GPU,

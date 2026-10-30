@@ -1,5 +1,5 @@
 """TrainDataset: fixed-size views of real and generated images, with optional masks of generated regions.
-ImageDataset: whole images for testing, under a fixed protocol.
+ImageDataset: whole images for testing.
 
 Pixels are never resized to fit the model: a training view is a size x size crop at the image's own resolution
 (only the downscale augmentation changes the scale), a test image is used whole and scored tile by tile.
@@ -132,36 +132,27 @@ class TrainDataset(Dataset):
 class ImageDataset(Dataset):
     """items: dicts with "path", "label" and optionally "mask" (PNG, white = generated).
 
-    protocol "native":    the whole image at its own resolution, as in training: nothing is cropped or resized
-                          but the patch grid (at most patch - 1 px at the right and bottom). Score it with
-                          Detector.full, which looks at large images tile by tile.
-    protocol "equalized": the whole image resized to `area` pixels, proportions kept: every image has the
-                          same size, a check that the model does not rely on size or resolution.
-    An image not stored as JPEG is JPEG-compressed once first (q90), as in training; both protocols end with
-    JPEG q90 4:2:0, since every training image is compressed. No shift: nothing is cut but the patch grid.
+    The whole image at its own resolution, as in training: nothing is cropped or resized but the patch grid
+    (at most patch - 1 px at the right and bottom). An image not stored as JPEG is JPEG-compressed once first
+    (q90), then every image gets JPEG q90 4:2:0, as every training image is compressed. Score it with
+    Detector.full, which looks at it in tiles of the training view size.
     """
 
-    def __init__(self, items: list[dict], patch: int, protocol: str = "native", area: int = 512 * 512):
-        self.items, self.patch, self.protocol, self.area = items, patch, protocol, area
+    def __init__(self, items: list[dict], patch: int):
+        self.items, self.patch = items, patch
 
     def __len__(self):
         return len(self.items)
-
-    def _fit(self, image: Image.Image, resample) -> Image.Image:
-        if self.protocol == "equalized":
-            p, s = self.patch, (self.area / (image.width * image.height)) ** 0.5
-            image = image.resize((max(p, round(image.width * s / p) * p), max(p, round(image.height * s / p) * p)), resample)
-        return to_grid(image, self.patch)
 
     def __getitem__(self, i):
         item = self.items[i]
         image = load(item["path"])
         size = image.size
-        image = compress(self._fit(image, Image.BICUBIC), "JPEG", 90)
+        image = compress(to_grid(image, self.patch), "JPEG", 90)
         out = {"image": to_tensor(image), "label": float(item["label"]), "has_mask": bool(item.get("mask"))}
         if item.get("mask"):
             with Image.open(item["mask"]) as m:
-                mask = self._fit(m.convert("L").resize(size, Image.NEAREST), Image.NEAREST)
+                mask = to_grid(m.convert("L").resize(size, Image.NEAREST), self.patch)
             out["mask"] = torch.from_numpy(np.array(mask, dtype=np.float32) / 255)[None]
         else:
             out["mask"] = torch.zeros(1, image.height, image.width)

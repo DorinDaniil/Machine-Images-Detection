@@ -6,7 +6,6 @@ Tests:
     OpenFake core/test   newer generators against DOCCI reals; generators also seen in training are marked
     SID_Set validation   fully synthetic and locally edited images (masks -> pixel F1) against SID reals
     renders              text pages, UI screens, charts, logos: false positives on non-photo reals
-Protocols: "native" (own resolution, as in training) and "equalized" (every image resized to the same area).
 Result: runs/pilot/report.md
 """
 
@@ -45,28 +44,26 @@ seen = {r["generator"] for name in ("openfake_train.csv", "sid_train.csv") if (d
 openfake_rows = openfake("test", data / "openfake_test", workers=d["workers"], **d["test"])
 sid_rows = sid_set("validation", data / "sid_validation", **d["sid"])
 
-tables = []
-for protocol in test["protocols"]:
-    def run(rows):
-        return score(model, ImageDataset(rows, model.patch_size, protocol), device, t["size"], t["num_workers"])
+def run(rows):
+    return score(model, ImageDataset(rows, model.patch_size), device, t["size"], t["num_workers"])
 
-    thr = threshold_at(run(calib)[0], test["alpha"])
-    docci, _ = run([r for r in openfake_rows if r["label"] == 0])
-    sid_real, _ = run([r for r in sid_rows if r["label"] == 0])
-    reals = {"DOCCI (OpenFake test)": docci, "SID_Set reals": sid_real, "renders (non-photo)": run(renders)[0]}
 
-    fakes = []
-    for gen in sorted({r["generator"] for r in openfake_rows if r["label"] == 1}):
-        s, f1 = run([r for r in openfake_rows if r["generator"] == gen])
-        fakes.append((f"{gen}{' (in train)' if gen in seen else ''}", docci, s, f1))
-    for kind in ("sid-full", "sid-edit"):
-        s, f1 = run([r for r in sid_rows if r["generator"] == kind])
-        fakes.append((f"{kind}{' (in train)' if kind in seen else ''}", sid_real, s, f1))
+thr = threshold_at(run(calib)[0], test["alpha"])
+docci, _ = run([r for r in openfake_rows if r["label"] == 0])
+sid_real, _ = run([r for r in sid_rows if r["label"] == 0])
+reals = {"DOCCI (OpenFake test)": docci, "SID_Set reals": sid_real, "renders (non-photo)": run(renders)[0]}
 
-    unseen = [f for name, _, f, _ in fakes if not name.endswith("(in train)") and not name.startswith("sid")]
-    summary = f"unseen OpenFake generators: mean TPR {np.mean([(f > thr).mean() for f in unseen]):.3f}" if unseen else ""
-    tables.append(f"## protocol: {protocol}\n\nthreshold {thr:.4f} for {test['alpha']:.0%} FPR on {len(calib)} "
-                  f"calibration reals. {summary}\n\n{report(thr, reals, fakes)}\n")
-    print(tables[-1])
+fakes = []
+for gen in sorted({r["generator"] for r in openfake_rows if r["label"] == 1}):
+    s, f1 = run([r for r in openfake_rows if r["generator"] == gen])
+    fakes.append((f"{gen}{' (in train)' if gen in seen else ''}", docci, s, f1))
+for kind in ("sid-full", "sid-edit"):
+    s, f1 = run([r for r in sid_rows if r["generator"] == kind])
+    fakes.append((f"{kind}{' (in train)' if kind in seen else ''}", sid_real, s, f1))
 
-(out / "report.md").write_text("\n".join(tables), encoding="utf-8")
+unseen = [f for name, _, f, _ in fakes if not name.endswith("(in train)") and not name.startswith("sid")]
+summary = f"unseen OpenFake generators: mean TPR {np.mean([(f > thr).mean() for f in unseen]):.3f}" if unseen else ""
+text = (f"threshold {thr:.4f} for {test['alpha']:.0%} FPR on {len(calib)} calibration reals. {summary}\n\n"
+        f"{report(thr, reals, fakes)}\n")
+print(text)
+(out / "report.md").write_text(text, encoding="utf-8")

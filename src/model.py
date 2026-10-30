@@ -46,19 +46,24 @@ class Detector(nn.Module):
         return patch_logits, self.pool(patch_logits)
 
     @torch.no_grad()
-    def full(self, x: torch.Tensor, tile: int = 512):
-        """A whole image, nothing cropped or resized: cut into nearly equal tiles of at most tile x tile on the
-        patch grid, each tile through the model, the patch logits stitched back into one map, then pooled."""
+    def full(self, x: torch.Tensor, tile: int = 512, step: int | None = None):
+        """A whole image, nothing cropped or resized, looked at in tiles of tile x tile, the size of the training
+        views (a side shorter than that is one tile). Tiles start every `step` px (default: tile, side by side)
+        and the last one ends at the image edge; where tiles overlap, their patch logits are averaged. Then the
+        map is pooled as in forward. step = tile // 2 removes seams between tiles at about 4x the cost."""
         p, m = self.patch_size, tile // self.patch_size
+        s = max(1, (step or tile) // p)
+        h, w = x.shape[2] // p, x.shape[3] // p
 
-        def cuts(n: int) -> list[int]:  # n patches -> pixel offsets of ceil(n / m) nearly equal parts
-            parts = -(-n // m)
-            return [round(i * n / parts) * p for i in range(parts + 1)]
+        def starts(n: int) -> list[int]:  # tile starts in patches along a side of n patches
+            return [0] if n <= m else list(range(0, n - m, s)) + [n - m]
 
-        ys, xs = cuts(x.shape[2] // p), cuts(x.shape[3] // p)
-        rows = [torch.cat([self.patches(x[:, :, y0:y1, x0:x1]) for x0, x1 in zip(xs, xs[1:])], dim=3)
-                for y0, y1 in zip(ys, ys[1:])]
-        patch_logits = torch.cat(rows, dim=2)
+        total, count = x.new_zeros(x.shape[0], 1, h, w, dtype=torch.float32), x.new_zeros(1, 1, h, w)
+        for y in starts(h):
+            for x0 in starts(w):
+                total[:, :, y:y + m, x0:x0 + m] += self.patches(x[:, :, y * p:(y + m) * p, x0 * p:(x0 + m) * p]).float()
+                count[:, :, y:y + m, x0:x0 + m] += 1
+        patch_logits = total / count
         return patch_logits, self.pool(patch_logits)
 
     def save(self, path) -> None:
