@@ -310,7 +310,7 @@ def test_scripts_end_to_end(tmp_path):
                 exec("".join(cell["source"]), ns)
     finally:
         os.chdir(cwd)
-    assert report_md.startswith(f"threshold {ns['threshold']:.4f}") and 0 <= ns["scores"]["example.jpg"] <= 1
+    assert report_md.startswith(f"threshold {ns['threshold']:.4f}") and 0 <= ns["prob"] <= 1
 
 
 def test_store_and_renders(tmp_path):
