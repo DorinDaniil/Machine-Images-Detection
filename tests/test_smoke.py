@@ -228,7 +228,7 @@ def test_sid_names_unique(tmp_path, monkeypatch):
 
 
 def test_scripts_end_to_end(tmp_path):
-    """download_data.py, run_train.py, run_test.py and the predict notebook on a tiny model and tiny data,
+    """download_data.py, run_train.py, run_test.py and the predict and t-SNE notebooks on a tiny model and tiny data,
     as on the server: whole images resized, SID edits with masks in training."""
     import subprocess
     import sys
@@ -301,19 +301,27 @@ def test_scripts_end_to_end(tmp_path):
     (tmp_path / "my_images").mkdir()
     Image.open(data / "openfake_test" / "7.png").save(tmp_path / "my_images" / "example.jpg")
     Image.open(data / "openfake_test" / "7.png").save(tmp_path / "my_images" / "example.png")
-    nb = json.loads((repo / "notebooks" / "predict.ipynb").read_text(encoding="utf-8"))
-    cwd = Path.cwd()
-    os.chdir(tmp_path)
-    try:
-        ns = {}
-        for cell in nb["cells"]:
-            if cell["cell_type"] == "code":
-                exec("".join(cell["source"]), ns)
-    finally:
-        os.chdir(cwd)
+    def notebook(name):
+        nb = json.loads((repo / "notebooks" / name).read_text(encoding="utf-8"))
+        cwd = Path.cwd()
+        os.chdir(tmp_path)
+        try:
+            ns = {}
+            for cell in nb["cells"]:
+                if cell["cell_type"] == "code":
+                    exec("".join(cell["source"]), ns)
+        finally:
+            os.chdir(cwd)
+        return ns
+
+    ns = notebook("predict.ipynb")
     assert report_md.startswith(f"threshold {ns['threshold']:.4f}") and 0 <= ns["prob"] <= 1
     for p in sorted((tmp_path / "my_images").iterdir()):  # the notebook prepares an image exactly as run_test.py
         assert torch.equal(ns["prepare"](p), ImageDataset([{"path": str(p), "label": 0}], cfg["train"]["size"])[0]["image"])
+
+    ns = notebook("tsne.ipynb")  # every test group, all its images here (fewer than n)
+    assert set(ns["names"]) == {"openfake/docci", "gen-a", "gen-new", "sid/real", "sid-full", "sid-edit", "renders"}
+    assert ns["points"].shape == (25, 2) and ns["vectors"].shape == (25, 16)
 
 
 def test_store_and_renders(tmp_path):
