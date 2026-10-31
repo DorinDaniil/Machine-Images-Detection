@@ -300,6 +300,7 @@ def test_scripts_end_to_end(tmp_path):
     (tmp_path / "configs" / "train.yaml").write_text(yaml.safe_dump(cfg))
     (tmp_path / "my_images").mkdir()
     Image.open(data / "openfake_test" / "7.png").save(tmp_path / "my_images" / "example.jpg")
+    Image.open(data / "openfake_test" / "7.png").save(tmp_path / "my_images" / "example.png")
     nb = json.loads((repo / "notebooks" / "predict.ipynb").read_text(encoding="utf-8"))
     cwd = Path.cwd()
     os.chdir(tmp_path)
@@ -311,6 +312,8 @@ def test_scripts_end_to_end(tmp_path):
     finally:
         os.chdir(cwd)
     assert report_md.startswith(f"threshold {ns['threshold']:.4f}") and 0 <= ns["prob"] <= 1
+    for p in sorted((tmp_path / "my_images").iterdir()):  # the notebook prepares an image exactly as run_test.py
+        assert torch.equal(ns["prepare"](p), ImageDataset([{"path": str(p), "label": 0}], cfg["train"]["size"])[0]["image"])
 
 
 def test_store_and_renders(tmp_path):
