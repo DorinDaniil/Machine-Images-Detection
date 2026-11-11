@@ -1,4 +1,4 @@
-"""ImageDataset: real and generated images, with optional masks of generated regions, as size x size views.
+"""ImageDataset: real and generated images as size x size views.
 
 Every image, whatever its size and shape, is resized whole to size x size (aspect not kept), as usual for vision
 models: the model sees every picture at one scale and nothing is cut off at test time. Every image is treated
@@ -72,53 +72,46 @@ def to_tensor(image) -> torch.Tensor:
     return torch.from_numpy(np.array(image, dtype=np.float32) / 255).permute(2, 0, 1)
 
 
+def random_crop(image: Image.Image, rng: np.random.Generator) -> Image.Image:
+    """A random part of the image: 50-100 % of its area, aspect from 1:2 to 2:1 whatever the image's own
+    aspect. So after the resize to a square the stretch is the same for both classes: generated images are
+    often square and photos are not, and without this the stretch alone would give the label away."""
+    area = image.width * image.height * rng.uniform(0.5, 1.0)
+    aspect = np.exp(rng.uniform(-np.log(2), np.log(2)))
+    w, h = min(image.width, round((area * aspect) ** 0.5)), min(image.height, round((area / aspect) ** 0.5))
+    x, y = int(rng.integers(0, image.width - w + 1)), int(rng.integers(0, image.height - h + 1))
+    return image.crop((x, y, x + w, y + h))
+
+
 class ImageDataset(Dataset):
-    """rows: dicts with "path", "label" (0 real, 1 generated) and optionally "mask" (PNG, white = generated).
-    Item: "image" [3, size, size]; "target" [1, size, size]: the mask if the image has one (only that region is
-    generated), else the label everywhere; "label"; "has_mask". All items have one size: batches as usual.
+    """rows: dicts with "path" and "label". Item: image [3, size, size] in [0, 1] and the label.
 
     train=False (validation, testing): the whole image resized to size x size (bicubic).
-    train=True, in this order, the target going through the same crop, resize and flip:
-      read             one JPEG pass first if the file is not a JPEG (see the module docstring);
-      crop_p           augmentation: a random part of 50-100 % of the image, aspect 3:4-4:3 (as RandomResizedCrop
-                       on ImageNet); the other views are the whole image;
-      degrade          at the image's own resolution (above MAX_SIDE shrunk to it first): resampling, blur, noise,
-                       then JPEG / WebP compression, always;
-      resize           to size x size, aspect not kept, with a random resampling filter;
-      flip             horizontal, half of the views.
+    train=True, in this order:
+      read      one JPEG pass first if the file is not a JPEG (see the module docstring);
+      crop      a random part of the image (random_crop);
+      degrade   at the image's own resolution (above MAX_SIDE shrunk to it first): resampling, blur, noise,
+                then JPEG / WebP compression, always;
+      resize    to size x size, aspect not kept, with a random resampling filter;
+      flip      horizontal, half of the views.
     """
 
-    def __init__(self, rows: list[dict], size: int = 512, train: bool = False, crop_p: float = 0.5, seed: int = 0):
-        self.rows, self.size, self.train, self.crop_p, self.seed, self.epoch = rows, size, train, crop_p, seed, 0
+    def __init__(self, rows: list[dict], size: int = 512, train: bool = False, seed: int = 0):
+        self.rows, self.size, self.train, self.seed, self.epoch = rows, size, train, seed, 0
 
     def __len__(self):
         return len(self.rows)
 
     def __getitem__(self, i):
+        row, size = self.rows[i], (self.size, self.size)
+        if not self.train:
+            return to_tensor(load(row["path"]).resize(size, Image.BICUBIC)), row["label"]
         rng = np.random.default_rng([self.seed, self.epoch, i])
-        row, size = self.rows[i], self.size
-        image = load(row["path"], rng if self.train else None)
-        if row.get("mask"):
-            with Image.open(row["mask"]) as m:
-                target = m.convert("L").resize(image.size, Image.NEAREST)
-        else:
-            target = Image.new("L", image.size, 255 * int(row["label"]))
-
-        if self.train and rng.random() < self.crop_p:
-            area = image.width * image.height * rng.uniform(0.5, 1.0)
-            aspect = np.exp(rng.uniform(np.log(3 / 4), np.log(4 / 3)))
-            w, h = min(image.width, round((area * aspect) ** 0.5)), min(image.height, round((area / aspect) ** 0.5))
-            x, y = int(rng.integers(0, image.width - w + 1)), int(rng.integers(0, image.height - h + 1))
-            image, target = image.crop((x, y, x + w, y + h)), target.crop((x, y, x + w, y + h))
-        if self.train:
-            s = MAX_SIDE / max(image.size)
-            if s < 1:  # the target needs no resize here: below it goes to size x size over the same extent
-                image = image.resize((round(image.width * s), round(image.height * s)), RESAMPLE[rng.integers(3)])
-            image = degrade(image, rng)
-        resample = RESAMPLE[rng.integers(3)] if self.train else Image.BICUBIC
-        image, target = image.resize((size, size), resample), target.resize((size, size), Image.NEAREST)
-        if self.train and rng.random() < 0.5:
-            image, target = image.transpose(Image.FLIP_LEFT_RIGHT), target.transpose(Image.FLIP_LEFT_RIGHT)
-
-        target = torch.from_numpy(np.array(target, dtype=np.float32) / 255)[None]
-        return {"image": to_tensor(image), "target": target, "label": float(row["label"]), "has_mask": bool(row.get("mask"))}
+        image = random_crop(load(row["path"], rng), rng)
+        s = MAX_SIDE / max(image.size)
+        if s < 1:
+            image = image.resize((round(image.width * s), round(image.height * s)), RESAMPLE[rng.integers(3)])
+        image = degrade(image, rng).resize(size, RESAMPLE[rng.integers(3)])
+        if rng.random() < 0.5:
+            image = image.transpose(Image.FLIP_LEFT_RIGHT)
+        return to_tensor(image), row["label"]

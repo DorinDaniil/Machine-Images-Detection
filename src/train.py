@@ -6,142 +6,96 @@ from pathlib import Path
 import torch
 from torch.utils.data import DataLoader, WeightedRandomSampler
 
-from .losses import patch_loss
-from .model import Detector
+from .model import Detector, family_loss, score
 
 
-class BinaryMetrics:
-    """Epoch-level accuracy, precision, recall, F1 and FPR: TP / FP / FN / TN are accumulated over all
-    images of the epoch at a fixed probability threshold, so batches of different size weigh correctly."""
-
-    def __init__(self, threshold: float = 0.5):
-        self.threshold = threshold
-        self.tp = self.fp = self.fn = self.tn = 0
-
-    def update(self, logits: torch.Tensor, labels: torch.Tensor) -> None:
-        pred = torch.sigmoid(logits.detach().float()).cpu() >= self.threshold
-        true = labels.detach().cpu() > 0.5
-        self.tp += int((pred & true).sum())
-        self.fp += int((pred & ~true).sum())
-        self.fn += int((~pred & true).sum())
-        self.tn += int((~pred & ~true).sum())
-
-    @staticmethod
-    def _ratio(a: int, b: int) -> float:
-        return a / b if b > 0 else 0.0
-
-    def summary(self) -> dict:
-        p, r = self._ratio(self.tp, self.tp + self.fp), self._ratio(self.tp, self.tp + self.fn)
-        return {"acc": self._ratio(self.tp + self.tn, self.tp + self.fp + self.fn + self.tn), "prec": p, "rec": r,
-                "f1": self._ratio(2 * p * r, p + r), "fpr": self._ratio(self.fp, self.fp + self.tn)}
+def stats(logits: torch.Tensor, label: torch.Tensor) -> dict:
+    """Loss, and accuracy, precision, recall, F1, FPR of "generated or real" at image score 0.5."""
+    pred, fake = score(logits)[0] > 0.5, label > 0
+    tp, fp = (pred & fake).sum().item(), (pred & ~fake).sum().item()
+    fn, tn = (~pred & fake).sum().item(), (~pred & ~fake).sum().item()
+    prec, rec = tp / max(tp + fp, 1), tp / max(tp + fn, 1)
+    return {"loss": family_loss(logits, label).item(), "acc": (tp + tn) / len(label), "prec": prec, "rec": rec,
+            "f1": 2 * prec * rec / max(prec + rec, 1e-9), "fpr": fp / max(fp + tn, 1)}
 
 
 @torch.no_grad()
-def validate(model: Detector, loader: DataLoader, device: str, threshold: float) -> dict:
-    """Loss averaged over images and the binary metrics of the whole validation set."""
+def validate(model: Detector, loader: DataLoader, device: str) -> dict:
     model.eval()
-    metrics, loss_sum, n = BinaryMetrics(threshold), 0.0, 0
-    for batch in loader:
-        image, target = batch["image"].to(device), batch["target"].to(device)
+    logits, labels = [], []
+    for image, label in loader:
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device == "cuda"):
-            patch_logits, image_logit = model(image)
-        loss_sum += patch_loss(patch_logits.float(), image_logit.float(), target).item() * len(image)
-        n += len(image)
-        metrics.update(image_logit, target.flatten(1).amax(1))  # label of the view, as in the loss
-    return {"loss": loss_sum / max(n, 1), **metrics.summary()}
+            logits.append(model(image.to(device)).float().cpu())
+        labels.append(label)
+    return stats(torch.cat(logits), torch.cat(labels))
 
 
-def balanced_weights(rows: list[dict], floor: int = 5000) -> list[float]:
-    """Sampling weights: half of the draws are reals, the other half is spread over generators equally,
-    except that a generator with fewer than `floor` images weighs in proportion to its size. So no image
-    is drawn more often than an image of a generator with `floor` images."""
-    counts = Counter(r["generator"] for r in rows)
-    mass = {g: min(n, floor) for g, n in counts.items() if g}
+def balanced_weights(rows: list[dict], floor: int = 10000) -> list[float]:
+    """Sampling weights by label (0 real, k = family k): half of the draws are reals, the other half is spread
+    over the families equally, so every head gets as many images of its family as the others. A family with
+    fewer than `floor` images weighs in proportion to its size: its images are not repeated too often."""
+    counts = Counter(r["label"] for r in rows)
+    mass = {k: min(n, floor) for k, n in counts.items() if k}
     total = sum(mass.values())
-    return [0.5 / counts[""] if not r["generator"] else 0.5 * mass[r["generator"]] / (total * counts[r["generator"]])
-            for r in rows]
+    return [0.5 / counts[0] if not r["label"] else 0.5 * mass[r["label"]] / (total * counts[r["label"]]) for r in rows]
 
 
-def fmt(stats: dict) -> str:
-    return " ".join(f"{k} {v:.4f}" for k, v in stats.items())
+def fmt(s: dict) -> str:
+    return " ".join(f"{k} {v:.4f}" for k, v in s.items())
 
 
 def train(model: Detector, train_set, val_set, cfg: dict, resume: bool = False) -> Path:
-    """cfg = the `train` block of configs/train.yaml. Every view has the same size, so `batch_size` images make
-    one batch and one optimizer step (an incomplete last batch is dropped). An epoch is `samples_per_epoch`
-    balanced draws (default: the size of the train set). Metrics of every epoch go to <out>/metrics.csv; best.pt
-    is the epoch with the lowest validation loss: it does not depend on a threshold, and the test sets its own one.
-
-    Every `save_every` optimizer steps and at the end of every epoch the whole training state (head, optimizer,
-    schedule, progress in the epoch, metrics so far) goes to <out>/state.pt. With resume=True training goes on
-    from it: the rest of the interrupted epoch is drawn anew from the same balanced sampler.
-    Returns the path of best.pt."""
+    """cfg = the `train` block of configs/train.yaml. An epoch is `samples_per_epoch` balanced draws, then
+    validation. Every epoch: metrics to <out>/metrics.csv, the whole training state to <out>/state.pt
+    (resume=True goes on from it), and best.pt if the validation loss is the lowest so far. Returns best.pt."""
     device = cfg["device"] if torch.cuda.is_available() else "cpu"
-    threshold, batch_size, save_every = cfg.get("threshold", 0.5), cfg["batch_size"], cfg.get("save_every", 1000)
-    samples = cfg.get("samples_per_epoch") or len(train_set)
     out = Path(cfg["out"])
     out.mkdir(parents=True, exist_ok=True)
-    weights = balanced_weights(train_set.rows, cfg.get("balance_floor", 5000))
+    batch_size = cfg["batch_size"]
+    steps = (cfg.get("samples_per_epoch") or len(train_set)) // batch_size
+    weights = balanced_weights(train_set.rows, cfg.get("balance_floor", 10000))
     val_loader = DataLoader(val_set, batch_size=batch_size, num_workers=cfg["num_workers"])
 
     model.to(device)
-    optimizer = torch.optim.AdamW(model.head.parameters(), lr=cfg["lr"], weight_decay=cfg["weight_decay"])
-    steps = max(1, samples // batch_size)
+    blocks = [p for p in model.vit.parameters() if p.requires_grad]
+    optimizer = torch.optim.AdamW([{"params": blocks, "lr": cfg["lr"]},
+                                   {"params": model.head.parameters(), "lr": cfg["head_lr"]}], weight_decay=cfg["weight_decay"])
     total = cfg["epochs"] * steps
-    warmup = min(200, total // 10 + 1)
+    warmup = min(500, total // 10 + 1)
     schedule = lambda step: min(1.0, (step + 1) / warmup) * 0.5 * (1 + math.cos(math.pi * step / total))  # noqa: E731
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, schedule)
 
-    state_path = out / "state.pt"
-    best, best_epoch, log, start, progress = math.inf, 0, [], 1, None
-    if resume and state_path.exists():
-        state = torch.load(state_path, map_location="cpu", weights_only=False)
-        model.head.load_state_dict(state["head"])
+    best, log, start = math.inf, [], 1
+    if resume and (out / "state.pt").exists():
+        state = torch.load(out / "state.pt", map_location="cpu", weights_only=False)
+        model.load_state_dict(state["model"])
         optimizer.load_state_dict(state["optimizer"])
         scheduler.load_state_dict(state["scheduler"])
-        best, best_epoch, log, start, progress = (state[k] for k in ("best", "best_epoch", "log", "epoch", "progress"))
-        print(f"resuming from {state_path}: epoch {start}, {progress['n'] if progress else 0} of {samples} images done")
-    elif state_path.exists():
-        print(f"{state_path} exists but resume is off: training starts from scratch and will overwrite it")
-
-    def save_state(epoch: int, progress) -> None:
-        tmp = out / "state.tmp"
-        torch.save({"head": model.head.state_dict(), "optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(),
-                    "best": best, "best_epoch": best_epoch, "log": log, "epoch": epoch, "progress": progress}, tmp)
-        tmp.replace(state_path)  # a crash while saving leaves the previous state whole
+        best, log, start = state["best"], state["log"], state["epoch"]
+        print(f"resuming from {out / 'state.pt'}: epoch {start}")
 
     for epoch in range(start, cfg["epochs"] + 1):
         model.train()
-        train_set.epoch = epoch
-        p = progress or {"n": 0, "step": 0, "loss_sum": 0.0, "counts": [0, 0, 0, 0]}
-        progress = None
-        metrics, loss_sum, n, step = BinaryMetrics(threshold), p["loss_sum"], p["n"], p["step"]
-        metrics.tp, metrics.fp, metrics.fn, metrics.tn = p["counts"]
-        left = (samples // batch_size - step) * batch_size  # whole batches still to go in this epoch
-        loader = DataLoader(train_set, batch_size=batch_size, drop_last=True, num_workers=cfg["num_workers"],
-                            pin_memory=device == "cuda",
-                            sampler=WeightedRandomSampler(weights, num_samples=left, replacement=True)) if left > 0 else []
-        for batch in loader:
-            image, target = batch["image"].to(device), batch["target"].to(device)
+        train_set.epoch = epoch  # new random views every epoch
+        sampler = WeightedRandomSampler(weights, num_samples=steps * batch_size, replacement=True)
+        loader = DataLoader(train_set, batch_size=batch_size, sampler=sampler, num_workers=cfg["num_workers"],
+                            pin_memory=device == "cuda")
+        logits, labels = [], []
+        for step, (image, label) in enumerate(loader, 1):
             with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device == "cuda"):
-                patch_logits, image_logit = model(image)
-            loss = patch_loss(patch_logits.float(), image_logit.float(), target)
+                out_logits = model(image.to(device)).float()
+            loss = family_loss(out_logits, label.to(device))
             optimizer.zero_grad()
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
             scheduler.step()
-            loss_sum += loss.item() * len(image)
-            n += len(image)
-            step += 1
-            metrics.update(image_logit, target.flatten(1).amax(1))  # a crop can cut an edit out
+            logits.append(out_logits.detach().cpu())
+            labels.append(label)
             if step % 50 == 0:
-                print(f"epoch {epoch} step {step}/{steps} mean loss {loss_sum / n:.4f}")
-            if step % save_every == 0:
-                save_state(epoch, {"n": n, "step": step, "loss_sum": loss_sum,
-                                   "counts": [metrics.tp, metrics.fp, metrics.fn, metrics.tn]})
+                print(f"epoch {epoch} step {step}/{steps} loss {loss.item():.4f}")
 
-        train_stats = {"loss": loss_sum / max(n, 1), **metrics.summary()}
-        val_stats = validate(model, val_loader, device, threshold)
+        train_stats, val_stats = stats(torch.cat(logits), torch.cat(labels)), validate(model, val_loader, device)
         print(f"epoch {epoch}: train {fmt(train_stats)}\n{' ' * (len(str(epoch)) + 7)} val   {fmt(val_stats)}")
         log.append({"epoch": epoch, **{f"train_{k}": v for k, v in train_stats.items()}, **{f"val_{k}": v for k, v in val_stats.items()}})
         with open(out / "metrics.csv", "w", newline="") as f:
@@ -149,10 +103,11 @@ def train(model: Detector, train_set, val_set, cfg: dict, resume: bool = False) 
             writer.writeheader()
             writer.writerows(log)
 
-        model.save(out / "last.pt")
         if val_stats["loss"] <= best:
-            best, best_epoch = val_stats["loss"], epoch
+            best = val_stats["loss"]
             model.save(out / "best.pt")
-        save_state(epoch + 1, None)  # this epoch is done
-    print(f"best.pt: epoch {best_epoch}, validation loss {best:.4f}")
+        torch.save({"model": model.state_dict(), "optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(),
+                    "best": best, "log": log, "epoch": epoch + 1}, out / "state.tmp")
+        (out / "state.tmp").replace(out / "state.pt")  # a crash while saving leaves the previous state whole
+    print(f"best.pt: validation loss {best:.4f}")
     return out / "best.pt"

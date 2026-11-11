@@ -1,5 +1,6 @@
-# Real images vs images of many open and API generators (OpenFake), frozen DINOv3 + patch head, trained on
-# whole images resized to 512 x 512, augmented; locally edited images with masks (SID_Set train) can be added.
+# Real images against images of many open and API generators (OpenFake). DINOv3 with its last blocks trained and
+# one head per generator family: every head is a specialist "this family against real", the image score is the
+# most confident head. Whole images resized to 512 x 512, augmented.
 # Test on newer generators, other real sources, local edits and non-photo reals: whole images at 512 x 512.
 # Data: 300k reals, up to 10k images of each of 36 generators; 3.3 TB downloaded, ~0.6 TB kept.
 
@@ -56,8 +57,6 @@ data:
     n_real: 5000
     real_sources: [docci]
     n_per_model: 1000
-  sid_train:                # SID_Set train: reals, fully synthetic and locally edited images with masks: the edits
-    n_per_class: 0          #   teach the patch map where a region was generated. 0: off. 20000: ~70 of 249 files, ~36 GB
   sid:                      # SID_Set validation: the test of local edits
     n_per_class: 1000
   n_render: 1000            # rendered text / UI / charts / logos: half for calibration, half for FPR test
@@ -65,30 +64,43 @@ data:
                             #   ~10 min to draw once, ~1.2 GB): fewer false positives on screenshots, documents, logos
 
 model:
-  backbone: vit_large_patch16_dinov3.lvd1689m   # timm, no access request; faster: vit_base_patch16_dinov3.lvd1689m
-  layers: [11, 17, 23]      # patch features of three blocks of ViT-L (24 blocks)
-  head_dim: 256
-  topk: 0.05                # image score = mean of the top 5 % patch logits
+  backbone: vit_large_patch16_dinov3.lvd1689m   # timm, no access request; lighter: vit_base_patch16_dinov3.lvd1689m
+  train_blocks: 8           # the last 8 of the 24 blocks are trained (all 12 for the base model), the first stay as
+                            #   pretrained. 0: frozen backbone, only the heads learn. Out of GPU memory: 4, or batch 16
+  families:                 # one head per family: generators of one maker or one architecture. A new version of a
+                            #   known family is caught by its head. One family with every generator = a plain
+                            #   real / generated classifier. Every generator of data.train.generators must be here
+    openai: [gpt-image-1, dalle-3]
+    google: [imagen-3.0-002, imagen-4.0, nano-banana-2]
+    midjourney: [midjourney-6]
+    ideogram: [ideogram-3.0]
+    xai: [grok-2-image-1212, grok-imagine]
+    seedream: [seedream-v4.0, seedream-v4.5]
+    flux: [flux-1.1-pro, flux.1-dev, flux.1-schnell, flux.2-dev, flux.2-klein-4b, chroma, mystic,
+           flux-amateursnapshotphotos, amateur-photography-v6]
+    sd: [sd-1.5, sd-2.1, sd-1.5-dreamshaper, realistic_vision_v5.1_novae]
+    sdxl: [sdxl, sdxl-juggernaut, sdxl-realvis-v5, sdxl-epic-realism, playground-v2.5-1024px-aesthetic]
+    dit: [sd-3.5, hidream-i1-full, qwen-image]        # other open diffusion transformers
+    video: [wan-video-2.2, wan-video-2.1, hunyuan-video, ltxv-2.3]
 
 train:
   size: 512                 # every image, whole, resized to 512 x 512 (aspect not kept), in training and testing;
-                            #   ImageNet mean / std are applied inside the backbone (src/backbone.py)
-  crop_p: 0.5               # augmentation: a random part of 50-100 % of the image, aspect 3:4-4:3 (RandomResizedCrop).
-                            #   Further (src/data/dataset.py), at the image's own resolution, before the resize: one
-                            #   JPEG pass first if the file is not a JPEG; resampling 20 %, blur 10 %, noise 20 %;
-                            #   JPEG q60-95 or WebP (20 %), a second JPEG 25 %. After the resize: flip
-  samples_per_epoch: null   # balanced draws per epoch, then validation and a checkpoint; null: the size of the
-                            #   train set (~585k images)
-  epochs: 5
-  balance_floor: 5000       # a generator with fewer images weighs in proportion to its size, the rest equally
-  batch_size: 32            # images per batch and optimizer step
+                            #   ImageNet mean / std are applied inside the model. Training views (src/data/dataset.py):
+                            #   one JPEG pass first if the file is not a JPEG; a random part of 50-100 % of the image,
+                            #   aspect 1:2-2:1; resampling 20 %, blur 10 %, noise 20 %; JPEG q60-95 or WebP (20 %),
+                            #   a second JPEG 25 %; the resize; flip
+  samples_per_epoch: 50000  # balanced draws, then validation, metrics.csv, state.pt and best.pt
+  epochs: 20                # 1M draws: ~1.7 passes over the ~585k train images
+  balance_floor: 10000      # half of every batch is real, the other half is shared by the families equally;
+                            #   a family with fewer images than this weighs in proportion to its size
+  batch_size: 32
   val_size: 5000            # images held out for validation; best.pt = epoch with the lowest validation loss
-  save_every: 1000          # optimizer steps (32k images) between saves of the training state; --resume goes on from it
-  lr: 3.0e-4
+  lr: 2.0e-5                # the trained blocks of the backbone
+  head_lr: 1.0e-3           # the heads
   weight_decay: 0.05
   num_workers: 8
   device: cuda
-  out: runs/pilot
+  out: runs/families
 
 test:
   alpha: 0.01               # target false-positive rate; threshold from calibration reals only

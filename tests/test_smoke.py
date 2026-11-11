@@ -12,67 +12,81 @@ from PIL import Image
 
 from src.data import ImageDataset, load_rows, render_folder, save_rows
 from src.data.download import _store
-from src.evaluate import report, score, threshold_at
-from src.losses import patch_loss
-from src.model import Detector
-from src.train import BinaryMetrics, balanced_weights, train
+from src.evaluate import predict, report, threshold_at
+from src.model import Detector, family_loss, score
+from src.train import balanced_weights, stats, train
 
 
 def make_rows(root, n=8, size=200):
-    """Reals, fakes of two 'generators' (smoother images) and one locally edited image with a mask."""
+    """Reals (label 0) and fakes of two 'generators' (smoother images), each generator its own family (1, 2)."""
     rng = np.random.default_rng(0)
     rows = []
     for i in range(n):
-        label = i % 2
-        noise = rng.integers(0, 255, (8 if label else 32, 8 if label else 32, 3), dtype=np.uint8)
+        fake, gen = i % 2, i % 4 // 2
+        noise = rng.integers(0, 255, (8 if fake else 32, 8 if fake else 32, 3), dtype=np.uint8)
         path = root / f"{i}.jpg"
         w, h = (size, size) if i < 2 else (size + 24 * (i % 3), size - 16 * (i % 2))  # sizes differ, as in OpenFake
         Image.fromarray(noise).resize((w, h), Image.BICUBIC).save(path, quality=95)
-        rows.append({"path": str(path), "label": label, "generator": f"gen{i % 4 // 2}" if label else "", "mask": "", "source": "toy"})
-    mask = np.zeros((size, size), np.uint8)
-    mask[50:120, 60:150] = 255
-    Image.fromarray(mask).save(root / "edit_mask.png")
-    rows[1]["mask"] = str(root / "edit_mask.png")
+        rows.append({"path": str(path), "label": 1 + gen if fake else 0, "generator": f"gen{gen}" if fake else "",
+                     "mask": "", "source": "toy"})
     return rows
+
+
+def test_loss_and_score():
+    """A head learns only from reals and from the fakes of its own family; the score is the most confident head."""
+    sure = torch.tensor([[9.0, -9.0], [9.0, 9.0]])  # family 1, whatever head 2 says about it
+    assert family_loss(sure, torch.tensor([1, 1])).item() < 1e-3
+    assert family_loss(sure[1:], torch.tensor([0])).item() > 8  # a real image: both heads are wrong
+    logits, label = torch.tensor([[0.3, -1.2], [2.0, 0.5], [-0.7, 1.1]]), torch.tensor([0, 2, 0])
+    bce = torch.nn.functional.binary_cross_entropy_with_logits
+    by_hand = bce(logits[[0, 2]], torch.zeros(2, 2)) + bce(logits[1, 1], torch.tensor(1.0))  # reals + fakes
+    assert family_loss(logits, label).item() == pytest.approx(by_hand.item())
+
+    s, head = score(torch.tensor([[-2.0, 3.0], [1.0, -4.0]]).bfloat16())
+    assert s.dtype == torch.float32 and head.tolist() == [1, 0] and s[0].item() == pytest.approx(torch.sigmoid(torch.tensor(3.0)).item(), abs=1e-3)
+    four = stats(torch.tensor([[2.0, -2.0], [-2.0, -2.0], [2.0, -2.0], [-2.0, -2.0]]), torch.tensor([1, 0, 0, 2]))
+    assert {k: four[k] for k in ("acc", "prec", "rec", "f1", "fpr")} == {"acc": 0.5, "prec": 0.5, "rec": 0.5, "f1": 0.5, "fpr": 0.5}
 
 
 def test_pipeline(tmp_path):
     rows = make_rows(tmp_path)
     save_rows(rows, tmp_path / "rows.csv")
-    assert load_rows(tmp_path / "rows.csv")[1]["label"] == 1
+    assert load_rows(tmp_path / "rows.csv")[3]["label"] == 2
 
     weights = balanced_weights(rows)
-    assert abs(sum(weights) - 1.0) < 1e-6  # half reals, half fakes spread over generators
-    small = [{"generator": g} for g in ["a"] * 4 + ["b"]]  # floor 2: b weighs like a 2-image generator
+    assert abs(sum(weights) - 1.0) < 1e-6  # half reals, half fakes spread over the families
+    small = [{"label": k} for k in [1] * 4 + [2]]  # floor 2: family 2 weighs like a family of 1 image, half of family 1
     w = balanced_weights(small, floor=2)
     assert abs(sum(w) - 0.5) < 1e-9 and abs(w[0] - 1 / 12) < 1e-9 and abs(w[4] - 1 / 6) < 1e-9
 
-    model = Detector("tiny", layers=(0, 1), head_dim=16, topk=0.1)
-    item = ImageDataset(rows, 160)[1]
-    assert item["image"].shape == (3, 160, 160) and 0 < item["target"].mean() < 1  # masked image: partial target
-    patch_logits, image_logit = model(item["image"][None])
-    assert patch_logits.shape == (1, 1, 10, 10) and image_logit.shape == (1,)
-    patch_loss(patch_logits, image_logit, item["target"][None]).backward()
+    model = Detector("tiny", ["a", "b"], train_blocks=1)
+    trained = {n for n, p in model.named_parameters() if p.requires_grad}
+    assert all(n.startswith(("vit.blocks.1.", "vit.norm.", "head.")) for n in trained) and "head.weight" in trained
+    assert not any(p.requires_grad for p in Detector("tiny", ["a"], train_blocks=0).vit.parameters())  # frozen backbone
+    image, label = ImageDataset(rows, 160)[1]
+    assert image.shape == (3, 160, 160) and label == 1
+    assert model(image[None]).shape == (1, 2) and model.features(image[None]).shape == (1, 64)
 
-    m = BinaryMetrics(0.5)
-    m.update(torch.tensor([2.0, -2.0, 2.0, -2.0]), torch.tensor([1.0, 0.0, 0.0, 1.0]))
-    assert m.summary() == {"acc": 0.5, "prec": 0.5, "rec": 0.5, "f1": 0.5, "fpr": 0.5}
-
-    cfg = dict(device="cpu", out=str(tmp_path / "run"), batch_size=2, num_workers=0, lr=1e-3, weight_decay=0.0, epochs=2)
+    cfg = dict(device="cpu", out=str(tmp_path / "run"), batch_size=2, num_workers=0, lr=1e-3, head_lr=1e-2,
+               weight_decay=0.0, epochs=2, samples_per_epoch=4)
+    before = [p.clone() for p in model.vit.blocks[0].parameters()]
     best = train(model, ImageDataset(rows[2:], 160, train=True), ImageDataset(rows[:4], 160), cfg)
+    assert all(torch.equal(a, b) for a, b in zip(before, model.vit.blocks[0].parameters()))  # frozen block untouched
     log = (tmp_path / "run" / "metrics.csv").read_text().splitlines()
     val_loss = [float(line.split(",")[log[0].split(",").index("val_loss")]) for line in log[1:]]
     assert len(val_loss) == 2 and best.exists()
-    best_model, last_model = Detector.load(best), Detector.load(tmp_path / "run" / "last.pt")
-    same = all(torch.equal(a, b) for a, b in zip(best_model.head.state_dict().values(), last_model.head.state_dict().values()))
+    best_model, last = Detector.load(best), torch.load(tmp_path / "run" / "state.pt", weights_only=False)["model"]
+    same = all(torch.equal(v, last[k]) for k, v in best_model.state_dict().items())
     assert same == (val_loss[1] <= val_loss[0])  # best.pt = the epoch with the lowest validation loss
+    assert best_model.config == model.config
 
     reals = [r for r in rows if r["label"] == 0]
-    real_scores, _ = score(best_model, ImageDataset(reals, 160), "cpu", batch_size=2, workers=0)
-    fake_scores, f1 = score(best_model, ImageDataset(rows[1:2], 160), "cpu", batch_size=2, workers=0)
-    assert np.isfinite(f1).all() and ((0 < real_scores) & (real_scores < 1)).all()
+    real_scores, _ = predict(best_model, ImageDataset(reals, 160), "cpu", batch_size=2, workers=0)
+    fake_scores, heads = predict(best_model, ImageDataset(rows[1:2], 160), "cpu", batch_size=2, workers=0)
+    assert ((0 < real_scores) & (real_scores < 1)).all() and heads.shape == (1,)
     thr = threshold_at(real_scores[:2], 0.5)
-    assert "| edit |" in report(thr, {"reals": real_scores[2:]}, [("edit", real_scores, fake_scores, f1)])
+    table = report(thr, {"reals": real_scores[2:]}, [("gen0", real_scores, fake_scores, heads)], ["a", "b"])
+    assert "| gen0 | 1 |" in table and table.rstrip().endswith(f"| {'ab'[heads[0]]} |")
 
 
 class Crash(ImageDataset):
@@ -90,101 +104,53 @@ class Crash(ImageDataset):
 
 
 def test_train_resume(tmp_path):
-    """A crash in the middle of epoch 2; resume goes on from the last saved state: no step lost or repeated."""
+    """A crash in the middle of epoch 2; resume goes on from the state saved after epoch 1."""
     rows = make_rows(tmp_path)
-    cfg = dict(device="cpu", out=str(tmp_path / "run"), batch_size=2, num_workers=0, lr=1e-3, weight_decay=0.0,
-               epochs=2, samples_per_epoch=8, save_every=1)
+    cfg = dict(device="cpu", out=str(tmp_path / "run"), batch_size=2, num_workers=0, lr=1e-3, head_lr=1e-2,
+               weight_decay=0.0, epochs=2, samples_per_epoch=4)
     val = ImageDataset(rows[:4], 160)
-    with pytest.raises(RuntimeError, match="power cut"):  # 8 images, then the 5th of epoch 2 (in its 3rd batch)
-        train(Detector("tiny", layers=(0, 1), head_dim=16), Crash(rows[2:], at=13, size=160, train=True), val, cfg)
+    with pytest.raises(RuntimeError, match="power cut"):  # 4 images of epoch 1, then the 2nd of epoch 2
+        train(Detector("tiny", ["a", "b"], train_blocks=1), Crash(rows[2:], at=6, size=160, train=True), val, cfg)
     state = torch.load(tmp_path / "run" / "state.pt", weights_only=False)
-    assert state["epoch"] == 2 and state["progress"]["n"] == 4 and len(state["log"]) == 1
-    assert state["scheduler"]["last_epoch"] == 6  # 4 steps of epoch 1, 2 of epoch 2
+    assert state["epoch"] == 2 and len(state["log"]) == 1 and state["scheduler"]["last_epoch"] == 2
 
-    resumed = Detector("tiny", layers=(0, 1), head_dim=16)  # as a new process: weights come from the state
+    resumed = Detector("tiny", ["a", "b"], train_blocks=1)  # as a new process: weights come from the state
     train(resumed, ImageDataset(rows[2:], 160, train=True), val, cfg, resume=True)
     state = torch.load(tmp_path / "run" / "state.pt", weights_only=False)
-    assert state["epoch"] == 3 and state["progress"] is None and state["scheduler"]["last_epoch"] == 8
+    assert state["epoch"] == 3 and state["scheduler"]["last_epoch"] == 4
     epochs = [line.split(",")[0] for line in (tmp_path / "run" / "metrics.csv").read_text().splitlines()[1:]]
     assert epochs == ["1", "2"]
-    assert all(torch.equal(a, b) for a, b in zip(resumed.head.state_dict().values(), state["head"].values()))
+    assert all(torch.equal(v, state["model"][k]) for k, v in resumed.state_dict().items())
 
 
-def test_train_views(tmp_path):
-    """Every view is the whole image resized to size x size, or (augmentation) a large part of it; validation
-    views are the whole image and fixed; targets follow the label."""
+def test_views(tmp_path):
+    """Test views are the whole image resized to size x size and never change; training views are random
+    parts of the image whose shape does not depend on the shape of the image."""
+    from src.data.dataset import random_crop
+
     rows = make_rows(tmp_path)
-    assert all(ImageDataset(rows, 160, train=True)[i]["image"].shape == (3, 160, 160) for i in range(8))
+    assert all(ImageDataset(rows, 160, train=True)[i][0].shape == (3, 160, 160) for i in range(8))
     val = ImageDataset(rows, 160)
-    assert torch.equal(val[2]["image"], val[2]["image"])  # validation views do not change
-    real, fake = val[0], val[3]
-    assert real["target"].max() == 0 and fake["target"].min() == 1 and real["label"] == 0 and fake["label"] == 1
+    assert torch.equal(val[2][0], val[2][0]) and val[0][1] == 0 and val[3][1] == 2
 
     halves = np.zeros((300, 900, 3), np.uint8)
     halves[:, 450:] = 255  # a wide image, dark left half, bright right half
     Image.fromarray(halves).save(tmp_path / "halves.png")
     item = {"path": str(tmp_path / "halves.png"), "label": 0}
-    view = ImageDataset([item], 128)[0]["image"]
+    view = ImageDataset([item], 128)[0][0]
     row = view.mean(0)[64]
     assert view.shape == (3, 128, 128) and row[:60].max() < 0.1 and row[68:].min() > 0.9  # squeezed, not cut
 
-    def bright(crop_p):  # bright share of the views: 1/2 for the whole image, flipped or not
-        ds, out = ImageDataset([item], 128, train=True, crop_p=crop_p), []
-        for ds.epoch in range(20):
-            out.append((ds[0]["image"].mean(0) > 0.5).float().mean().item())
-        return np.array(out)
+    ds, bright = ImageDataset([item], 128, train=True), []
+    for ds.epoch in range(20):
+        bright.append((ds[0][0].mean(0) > 0.5).float().mean().item())
+    assert (abs(np.array(bright) - 0.5) > 0.05).mean() > 0.5  # parts of the image, not the whole of it
 
-    assert (abs(bright(0.0) - 0.5) < 0.03).all()
-    assert (abs(bright(1.0) - 0.5) > 0.05).mean() > 0.5  # parts of the image
-
-
-def test_augment_alignment(tmp_path, monkeypatch):
-    """The target map follows the generated region through crop, shrink to MAX_SIDE, degradations, resize and flip."""
-    from src.data import dataset
-
-    monkeypatch.setattr(dataset, "MAX_SIDE", 400)  # this 600 px image counts as large
-    image = np.full((500, 600, 3), 128, np.uint8)
-    image[150:350, 200:450] = (255, 0, 0)
-    mask = np.zeros((500, 600), np.uint8)
-    mask[150:350, 200:450] = 255
-    Image.fromarray(image).save(tmp_path / "edit.png")
-    Image.fromarray(mask).save(tmp_path / "edit_mask.png")
-    ds = ImageDataset([{"path": str(tmp_path / "edit.png"), "label": 1, "mask": str(tmp_path / "edit_mask.png")}],
-                      256, train=True)
-    checked = 0
-    for ds.epoch in range(30):
-        item = ds[0]
-        target, red = item["target"][0], item["image"][0] - item["image"][1]  # red minus green: ~1 in the region
-        assert target.shape == item["image"].shape[1:]
-        inside, outside = target > 0.5, target < 0.5
-        if inside.sum() > 100 and outside.sum() > 100:
-            assert red[inside].mean() > 0.6 and red[outside].mean() < 0.25, ds.epoch
-            checked += 1
-    assert checked >= 10
-
-
-def test_pool():
-    """The image logit is the mean of the top 5 % patch logits, in float32."""
-    model = Detector("tiny", layers=(0, 1), head_dim=16, topk=0.05)
-    hot = torch.zeros(1, 1, 100, 100)
-    hot.view(-1)[:50] = 1.0  # 10 000 patches, 50 of them generated
-    assert model.pool(hot).item() == pytest.approx(50 / 500)  # 5 % of all patches, as in training
-    assert model.pool(hot.bfloat16()).dtype == torch.float32  # no bf16 ties at the threshold
-
-
-def test_test_views(tmp_path):
-    """Test images are resized whole, nothing is cut off; the mask follows the image."""
-    image = np.full((500, 700, 3), 128, np.uint8)
-    image[:, 650:] = (255, 0, 0)  # a region at the far right edge must stay in view
-    mask = np.zeros((500, 700), np.uint8)
-    mask[:, 650:] = 255
-    Image.fromarray(image).save(tmp_path / "wide.png")
-    Image.fromarray(mask).save(tmp_path / "wide_mask.png")
-    items = [{"path": str(tmp_path / "wide.png"), "label": 1, "mask": str(tmp_path / "wide_mask.png")}]
-    item = ImageDataset(items, 256)[0]
-    assert item["image"].shape == (3, 256, 256) and item["target"].shape == (1, 256, 256) and item["has_mask"]
-    red, region = item["image"][0] - item["image"][1], item["target"][0] > 0.5
-    assert region.any() and red[region].mean() > 0.6 and red[~region].mean() < 0.2
+    rng = np.random.default_rng(0)
+    for size in ((1024, 1024), (1500, 1000)):  # a square generation and a 3:2 photo
+        crops = [random_crop(Image.new("RGB", size), rng).size for _ in range(300)]
+        aspect, area = np.array([w / h for w, h in crops]), np.array([w * h for w, h in crops]) / (size[0] * size[1])
+        assert aspect.min() < 0.7 and aspect.max() > 1.4 and area.min() > 0.35 and area.max() <= 1
 
 
 def test_compression_history(tmp_path):
@@ -229,7 +195,7 @@ def test_sid_names_unique(tmp_path, monkeypatch):
 
 def test_scripts_end_to_end(tmp_path):
     """download_data.py, run_train.py, run_test.py and the predict and t-SNE notebooks on a tiny model and tiny data,
-    as on the server: whole images resized, SID edits with masks in training."""
+    as on the server."""
     import subprocess
     import sys
 
@@ -259,16 +225,15 @@ def test_scripts_end_to_end(tmp_path):
     sid = [(0, "", "sid/real", False)] * 3 + [(1, "sid-full", "sid/full", False)] * 3 + [(1, "sid-edit", "sid/edit", True)] * 3
     table("openfake_train", [(0, "", "openfake/laion", False)] * 12 + [(1, "gen-a", "openfake", False)] * 6 + [(1, "gen-b", "openfake", False)] * 6)
     table("openfake_test", [(0, "", "openfake/docci", False)] * 6 + [(1, "gen-a", "openfake", False)] * 3 + [(1, "gen-new", "openfake", False)] * 3)
-    table("sid_train", sid)
     table("sid_validation", sid)
 
     cfg = {"data": {"dir": "data", "workers": 1, "train": {"n_real": None, "n_per_model": None},
                     "test": {"n_real": 10, "real_sources": ["docci"], "n_per_model": 10},
-                    "sid_train": {"n_per_class": 3}, "sid": {"n_per_class": 3}, "n_render": 8, "render_train": 0.25},
-           "model": {"backbone": "tiny", "layers": [0, 1], "head_dim": 16, "topk": 0.05},
-           "train": {"size": 128, "crop_p": 0.5, "samples_per_epoch": 16, "epochs": 2,
-                     "balance_floor": 5000, "batch_size": 4, "val_size": 4, "lr": 1e-3, "weight_decay": 0.0,
-                     "num_workers": 0, "device": "cpu", "out": "runs/pilot"},
+                    "sid": {"n_per_class": 3}, "n_render": 8, "render_train": 0.25},
+           "model": {"backbone": "tiny", "train_blocks": 1, "families": {"fam-a": ["gen-a"], "fam-b": ["gen-b"]}},
+           "train": {"size": 128, "samples_per_epoch": 16, "epochs": 2, "balance_floor": 10000, "batch_size": 4,
+                     "val_size": 4, "lr": 1e-3, "head_lr": 1e-2, "weight_decay": 0.0,
+                     "num_workers": 0, "device": "cpu", "out": "runs/families"},
            "test": {"alpha": 0.1, "max_calib": 6}}
     (tmp_path / "tiny.yaml").write_text(yaml.safe_dump(cfg))
 
@@ -281,17 +246,18 @@ def test_scripts_end_to_end(tmp_path):
 
     run("download_data.py")  # everything is cached: nothing is downloaded
     train_log = run("run_train.py")
-    assert "with masks" in train_log and "best.pt: epoch" in train_log
-    assert "incl. 3 renders" in train_log  # 15 reals, 2 for calibration, a quarter of the other 13 drawn
+    assert "images per family: fam-a 6, fam-b 6" in train_log and "best.pt: validation loss" in train_log
+    assert "incl. 3 renders" in train_log  # 12 reals, 1 for calibration, a quarter of the other 11 drawn
     assert len(list((data / "renders").glob("train_*"))) == 3  # training fonts, apart from the test renders
-    calibration = json.loads((tmp_path / "runs" / "pilot" / "calibration.json").read_text())
-    train_paths = {r["path"] for name in ("openfake_train", "sid_train") for r in load_rows(data / f"{name}.csv")}
+    calibration = json.loads((tmp_path / "runs" / "families" / "calibration.json").read_text())
+    train_paths = {r["path"] for r in load_rows(data / "openfake_train.csv")}
     assert set(calibration["reals"]) <= train_paths and len(calibration["renders"]) == 4
     assert all(Path(p).name.startswith("test_") for p in calibration["renders"] + calibration["renders_test"])
     run("run_test.py")
-    report_md = (tmp_path / "runs" / "pilot" / "report.md").read_text()
-    assert report_md.startswith("threshold ") and "protocol" not in report_md
-    assert "| gen-a (in train) |" in report_md and "| gen-new |" in report_md and "| sid-edit (in train) |" in report_md
+    report_md = (tmp_path / "runs" / "families" / "report.md").read_text()
+    assert report_md.startswith("threshold ")
+    assert "| gen-a (in train) |" in report_md and "| gen-new |" in report_md and "| sid-edit |" in report_md
+    assert all(line.rstrip(" |").endswith(("fam-a", "fam-b")) for line in report_md.splitlines() if line.startswith(("| gen-", "| sid-")))
     assert "calibration reals. unseen OpenFake generators: mean TPR" in report_md
 
     import matplotlib  # the predict notebook, cell by cell, with the trained tiny model
@@ -317,11 +283,11 @@ def test_scripts_end_to_end(tmp_path):
     ns = notebook("predict.ipynb")
     assert report_md.startswith(f"threshold {ns['threshold']:.4f}") and 0 <= ns["prob"] <= 1
     for p in sorted((tmp_path / "my_images").iterdir()):  # the notebook prepares an image exactly as run_test.py
-        assert torch.equal(ns["prepare"](p), ImageDataset([{"path": str(p), "label": 0}], cfg["train"]["size"])[0]["image"])
+        assert torch.equal(ns["prepare"](p), ImageDataset([{"path": str(p), "label": 0}], cfg["train"]["size"])[0][0])
 
     ns = notebook("tsne.ipynb")  # every test group, all its images here (fewer than n)
     assert set(ns["names"]) == {"openfake/docci", "gen-a", "gen-new", "sid/real", "sid-full", "sid-edit", "renders"}
-    assert ns["points"].shape == (25, 2) and ns["vectors"].shape == (25, 16)
+    assert ns["points"].shape == (25, 2) and ns["vectors"].shape == (25, 64)
 
 
 def test_store_and_renders(tmp_path):
