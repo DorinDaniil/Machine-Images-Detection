@@ -7,7 +7,7 @@ straight to the folders training reads:
     data/fake/<generator>/     gpt-image-1, flux.1-dev, ...
 Stop it any time (Ctrl+C) and run it again: finished files are skipped. run_train.py and run_test.py read
 these folders and download nothing. Put your own folders with real images into data/real/, or list them
-in data.real_dirs. At the end the table of the data is printed: run it again any time to see what is there.
+in data.real_dirs. At the end the number of images of every generator is printed.
 """
 
 import argparse
@@ -20,7 +20,7 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.stdout.reconfigure(line_buffering=True)  # every line at once, also through `| tee`
 
-from src.data import data_table, load_pool, openfake, sid_set  # noqa: E402
+from src.data import distribution, load_pool, openfake, sid_set  # noqa: E402
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--config", default="configs/train.yaml")
@@ -35,4 +35,4 @@ sid_set("validation", data / "sid_validation", **d["sid"])
 
 used = sum(f.stat().st_size for f in data.rglob("*") if f.is_file()) / 1e9
 print(f"done: {used:.0f} GB in {data}, {shutil.disk_usage(data).free / 1e9:.0f} GB free")
-print(data_table(load_pool(d), cfg["model"]["families"]))  # what is there, by source, generator and part
+print(distribution(load_pool(d), cfg["model"]["families"]))  # images per generator

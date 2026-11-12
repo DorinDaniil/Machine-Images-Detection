@@ -61,24 +61,12 @@ def load_pool(d: dict) -> dict:
     return parts
 
 
-def data_table(parts: dict, families: dict) -> str:
-    """The data as a table: a line per real source and per generator (with its family), the number of its images
-    in train, val and test and the share of them stored as JPEG; after each kind, its total."""
+def distribution(parts: dict, families: dict) -> str:
+    """For the terminal: images per generator, most first, with its share of the generated images and its family;
+    then the totals."""
     family = {g: name for name, models in families.items() for g in models}
-    count, jpeg = {}, Counter()
-    for name, rows in parts.items():
-        for r in rows:
-            key = (r["label"], family.get(r["generator"], "") if r["label"] else "", r["generator"] or r["source"])
-            count.setdefault(key, Counter())[name] += 1
-            jpeg[key] += r["path"].lower().endswith((".jpg", ".jpeg"))
-
-    def line(title, fam, n, n_jpeg):
-        total = sum(n.values())
-        return f"| {title} | {fam} | {n['train']} | {n['val']} | {n['test']} | {total} | {n_jpeg / max(total, 1):.0%} |"
-
-    lines = ["| images | family | train | val | test | all | JPEG |", "|---|---|---|---|---|---|---|"]
-    for label, kind in ((0, "real"), (1, "fake")):
-        keys = sorted((k for k in count if k[0] == label), key=lambda k: (not k[1], k))  # by family; no family last
-        lines += [line(f"{kind}: {k[2]}", k[1], count[k], jpeg[k]) for k in keys]
-        lines.append(line(f"**all {kind}**", "", sum((count[k] for k in keys), Counter()), sum(jpeg[k] for k in keys)))
-    return "\n".join(lines)
+    rows = [r for part in parts.values() for r in part]
+    count = Counter(r["generator"] for r in rows if r["label"])
+    total = sum(count.values())
+    lines = [f"{n:8d}  {n / total:5.1%}  {g:34s} {family.get(g, '-')}" for g, n in count.most_common()]
+    return "\n".join(lines + [f"{total:8d}  generated images of {len(count)} generators; {len(rows) - total} real images"])

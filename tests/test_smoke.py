@@ -14,7 +14,7 @@ import torch
 import torch.nn.functional as F
 from PIL import Image
 
-from src.data import ImageDataset, data_table, load_pool, load_rows, render_folder, save_rows
+from src.data import ImageDataset, distribution, load_pool, load_rows, render_folder, save_rows
 from src.data.download import _store
 from src.evaluate import predict, report, thresholds, verdict
 from src.model import Detector, score
@@ -233,12 +233,8 @@ def test_folders_and_split(tmp_path):
     assert len({r["path"] for r in rows}) == len(rows) == 105  # every image in exactly one part
     assert 10 <= len(parts["val"]) <= 32 and 10 <= len(parts["test"]) <= 32  # about a fifth each
 
-    stats = data_table(parts, {"fam": ["gen-a"]}).splitlines()  # | images | family | train | val | test | all | JPEG |
-    cells = {line.split("|")[1].strip(): [c.strip() for c in line.split("|")[2:-1]] for line in stats[2:]}
-    assert cells["fake: gen-a"][0] == "fam" and cells["fake: gen-a"][4:] == ["40", "0%"]
-    assert cells["real: my_reals/logos"][4:] == ["10", "100%"] and cells["real: laion"][0] == ""
-    assert cells["**all real**"][4] == "65" and cells["**all fake**"][4] == "40"
-    assert [int(cells["**all real**"][i]) + int(cells["**all fake**"][i]) for i in (1, 2, 3)] == [len(parts[k]) for k in parts]
+    assert distribution(parts, {"fam": ["gen-a"]}).split() == [
+        "40", "100.0%", "gen-a", "fam", "40", "generated", "images", "of", "1", "generators;", "65", "real", "images"]
 
     where = {r["path"]: name for name, part_rows in parts.items() for r in part_rows}
     for i in range(10, 30):
@@ -343,7 +339,7 @@ def test_scripts_end_to_end(tmp_path):
         assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-3000:]
         return done.stdout
 
-    assert "| **all fake** |  |" in run("download_data.py")  # everything is cached: nothing is downloaded; the data table
+    assert "44  generated images of 3 generators; " in run("download_data.py")  # cached: nothing is downloaded
     assert len(list((data / "fake" / "gen-a").iterdir())) == 20 and len(list((data / "real" / "docci").iterdir())) == 8
     train_log = run("run_train.py")
     sizes = {name: (int(n_real), int(n_fake)) for name, n_real, n_fake in
@@ -355,8 +351,7 @@ def test_scripts_end_to_end(tmp_path):
     assert re.search(r"expert fam-b: \d+ generated images of 1 models", train_log) and "fam-b: best validation loss" in train_log
     run_dir = tmp_path / "runs" / "experts"
     assert sorted(p.name for p in (run_dir / "experts").iterdir()) == ["all.pt", "fam-a.pt", "fam-b.pt"]
-    data_md = (run_dir / "data.md").read_text()
-    assert "| fake: gen-a | fam-a |" in data_md and "| fake: gen-new |  |" in data_md and "| real: my_reals/logos |" in data_md
+    assert re.search(r"20 +45\.5% +gen-a +fam-a\n", train_log) and re.search(r"8 +18\.2% +gen-new +-\n", train_log)
     again = run("run_train.py", "--resume")  # nothing is left to train
     assert all(f"{name}: trained, skipped" in again for name in ("all", "fam-a", "fam-b")) and "epoch 1" not in again
     only = run("run_train.py", "--only", "fam-a")  # one expert again, on the same trunk
