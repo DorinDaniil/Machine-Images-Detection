@@ -31,7 +31,7 @@ def validate(model: Detector, name: str, loader: DataLoader, device: str) -> dic
     for image, label in loader:
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device == "cuda"):
             logits.append(model(image.to(device), [name])[name].float().cpu())
-        labels.append(label)
+        labels.append(label.clone())  # a copy: what the loader gives holds shared memory and an open file each
     return stats(torch.cat(logits), torch.cat(labels))
 
 
