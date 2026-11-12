@@ -241,53 +241,6 @@ def test_folders_and_split(tmp_path):
     assert part("/disk1/data/real/laion/7.jpg", 0.2, 0.2) == part("/another/place/laion/7.jpg", 0.2, 0.2)  # data moved
 
 
-def test_migrate_old_layout(tmp_path):
-    """scripts/migrate_data.py (one-off, to be deleted with this test): the flat folders of the old downloader
-    become what the new downloader writes, in the csv lists and in the records of finished files alike."""
-    import subprocess
-    import sys
-
-    import yaml
-
-    data, blank = tmp_path / "data", Image.new("RGB", (40, 40))
-    specs = {"train": [(0, "", "openfake/laion")] * 6 + [(1, "gen-a", "openfake")] * 6,
-             "test": [(0, "", "openfake/docci")] * 4 + [(1, "gen-a", "openfake")] * 4}
-    for split, spec in specs.items():
-        folder = data / f"openfake_{split}"
-        (folder / "done").mkdir(parents=True)
-        rows = []
-        for i, (label, generator, source) in enumerate(spec):
-            blank.save(folder / f"0000_{i:05d}.png")
-            rows.append({"path": str(folder / f"0000_{i:05d}.png"), "label": label, "generator": generator, "mask": "",
-                         "source": source, "prompt": f"prompt {i}", "prompt_kind": "", "row_id": f"row-{i}"})
-        (folder / "done" / "0000.json").write_text(json.dumps({"read": len(rows), "rows": rows}))
-        if split == "train":  # the test split was still downloading: records only, no list yet
-            save_rows(rows, data / "openfake_train.csv")
-    (tmp_path / "tiny.yaml").write_text(yaml.safe_dump({"data": {"dir": "data"}}))
-
-    def migrate():
-        done = subprocess.run([sys.executable, str(Path(__file__).resolve().parents[1] / "scripts" / "migrate_data.py"),
-                               "--config", "tiny.yaml"], cwd=tmp_path, capture_output=True, text=True, timeout=120)
-        assert done.returncode == 0, done.stdout[-2000:] + done.stderr[-2000:]
-        return done.stdout
-
-    log = migrate()
-    assert "20 images moved" in log and "0 of them not found, 0 files left" in log
-    names = lambda folder: sorted(p.name for p in (data / folder).iterdir())  # noqa: E731
-    assert names("fake/gen-a") == [f"test_0000_{i:05d}.png" for i in range(4, 8)] + [f"train_0000_{i:05d}.png" for i in range(6, 12)]
-    assert names("real/laion") == [f"train_0000_{i:05d}.png" for i in range(6)] and len(names("real/docci")) == 4
-    rows = load_rows(data / "openfake_train.csv")
-    record = json.loads((data / "openfake_train" / "done" / "0000.json").read_text())
-    assert [r["path"] for r in rows] == [r["path"] for r in record["rows"]] and record["read"] == 12
-    assert all((tmp_path / r["path"]).exists() for r in rows) and rows[7]["prompt"] == "prompt 7" and rows[7]["row_id"] == "row-7"
-    assert Path(rows[7]["path"]).parts[-3:] == ("fake", "gen-a", "train_0000_00007.png")
-    record = json.loads((data / "openfake_test" / "done" / "0000.json").read_text())
-    assert all((tmp_path / r["path"]).exists() for r in record["rows"]) and not (data / "openfake_test.csv").exists()
-
-    assert "0 images moved" in migrate()  # again: nothing moves, nothing is renamed twice
-    assert load_rows(data / "openfake_train.csv") == rows and len(names("fake/gen-a")) == 10
-
-
 def test_compression_history(tmp_path):
     """A file not stored as JPEG gets one JPEG pass before anything else; a JPEG file is read as it is."""
     from src.data.dataset import load
