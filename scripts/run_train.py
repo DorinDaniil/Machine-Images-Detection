@@ -13,6 +13,7 @@ Every expert is saved to <out>/experts/<name>.pt at its best validation epoch.
 """
 
 import argparse
+import faulthandler
 import random
 import sys
 from pathlib import Path
@@ -21,6 +22,7 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.stdout.reconfigure(line_buffering=True)  # every line at once, also through `| tee`
+faulthandler.enable()  # a crash inside torch or the GPU driver leaves the Python stack in the log, not a silent exit
 
 from src.data import distribution, load_pool  # noqa: E402
 from src.model import Detector  # noqa: E402

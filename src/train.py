@@ -98,16 +98,17 @@ def train(model: Detector, name: str, reals: list, fakes: list, val: list, cfg: 
                             drop_last=True, num_workers=cfg["num_workers"], pin_memory=device == "cuda")
         logits, labels = [], []
         for step, (image, label) in enumerate(islice(loader, steps - done), done + 1):
+            label = label.to(device)
             with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device == "cuda"):
                 out_logits = model(image.to(device), [name])[name].float()
-            loss = F.cross_entropy(out_logits, label.to(device))
+            loss = F.cross_entropy(out_logits, label)
             optimizer.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(body + head, 1.0)
             optimizer.step()
             scheduler.step()
             logits.append(out_logits.detach().cpu())
-            labels.append(label)
+            labels.append(label.cpu())  # a copy: what the loader gives sits in pinned memory, one allocation per step
             if step % 50 == 0:
                 print(f"{name} epoch {epoch} step {step}/{steps} loss {loss.item():.4f}")
             if step % cfg["save_every"] == 0 and step < steps:
