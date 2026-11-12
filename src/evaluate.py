@@ -39,11 +39,11 @@ def verdict(prob: np.ndarray, thr: np.ndarray):
 
 
 def report(model: Detector, thr: np.ndarray, reals: dict, fakes: list) -> str:
-    """reals: {set: prob [n, K]} -> measured FPR. fakes: [(group, prob [n, K], index [n, K])] -> TPR, the expert
-    that answers for the group most often, the model it names most often and, for a generator seen in training,
-    how often the model is named exactly."""
+    """reals: {source: prob [n, K]} -> measured FPR. fakes: [(group, prob [n, K], index [n, K])] -> TPR, the expert
+    that answers for the group most often, the model it names most often and, for a generator the model was
+    trained on, how often the model is named exactly."""
     names, seen = list(model.experts), set(model.experts["all"].models)
-    lines = ["| real set | n | FPR |", "|---|---|---|"]
+    lines = ["| real source | n | FPR |", "|---|---|---|"]
     lines += [f"| {name} | {len(prob)} | {verdict(prob, thr)[0].mean():.3f} |" for name, prob in reals.items()]
     lines += ["", "| fake group | n | TPR | expert | named as | exact model |", "|---|---|---|---|---|---|"]
     for group, prob, index in fakes:
@@ -51,6 +51,5 @@ def report(model: Detector, thr: np.ndarray, reals: dict, fakes: list) -> str:
         named = [model.experts[names[w]].models[index[i, w]] for i, w in enumerate(winner)]
         expert, model_name = Counter(names[w] for w in winner).most_common(1)[0][0], Counter(named).most_common(1)[0][0]
         exact = f"{np.mean([name == group for name in named]):.3f}" if group in seen else ""
-        lines.append(f"| {group}{' (in train)' if group in seen else ''} | {len(prob)} | {hit.mean():.3f} | {expert} | "
-                     f"{model_name} | {exact} |")
+        lines.append(f"| {group} | {len(prob)} | {hit.mean():.3f} | {expert} | {model_name} | {exact} |")
     return "\n".join(lines)

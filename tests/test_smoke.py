@@ -4,6 +4,8 @@ import io
 import json
 import math
 import os
+import re
+from collections import Counter
 from pathlib import Path
 
 import numpy as np
@@ -12,7 +14,7 @@ import torch
 import torch.nn.functional as F
 from PIL import Image
 
-from src.data import ImageDataset, load_rows, render_folder, save_rows
+from src.data import ImageDataset, load_pool, load_rows, render_folder, save_rows, sort_folders
 from src.data.download import _store
 from src.evaluate import predict, report, thresholds, verdict
 from src.model import Detector, score
@@ -109,7 +111,7 @@ def test_pipeline(tmp_path):
     thr = thresholds(prob[real], 0.2)
     table = report(loaded, thr, {"reals": prob[real]}, [("gen0", prob[~real], index[~real]), ("new", prob[~real], index[~real])])
     seen, unseen = ([c.strip() for c in line.split("|")] for line in table.splitlines()[-2:])
-    assert seen[1:3] == ["gen0 (in train)", "8"] and seen[4] in ("all", "one") and seen[5] in ("gen0", "gen1") and seen[6]
+    assert seen[1:3] == ["gen0", "8"] and seen[4] in ("all", "one") and seen[5] in ("gen0", "gen1") and seen[6]
     assert unseen[1:3] == ["new", "8"] and unseen[3:6] == seen[3:6] and unseen[6] == ""  # no true name to compare with
 
 
@@ -174,6 +176,77 @@ def test_views(tmp_path):
         crops = [random_crop(Image.new("RGB", size), rng).size for _ in range(300)]
         aspect, area = np.array([w / h for w, h in crops]), np.array([w * h for w, h in crops]) / (size[0] * size[1])
         assert aspect.min() < 0.7 and aspect.max() > 1.4 and area.min() > 0.35 and area.max() <= 1
+
+    from src.data.dataset import degrade
+
+    photo = Image.fromarray(np.random.default_rng(1).integers(0, 255, (90, 120, 3), dtype=np.uint8))
+    changed = []
+    for seed in range(60):  # colour, sharpening, a patch, resampling, blur, noise, compression: the size is kept
+        out = degrade(photo.copy(), np.random.default_rng(seed))
+        assert out.size == photo.size and out.mode == "RGB"
+        changed.append(np.abs(np.asarray(out, np.float32) - np.asarray(photo, np.float32)).mean())
+    assert min(changed) > 0 and max(changed) > 3 * min(changed)  # always compressed, some views much more changed
+
+    (tmp_path / "broken.jpg").write_bytes(b"not an image")  # reported and replaced by the next image
+    ds = ImageDataset([{"path": str(tmp_path / "broken.jpg"), "label": 1}, item], 64)
+    image, label = ds[0]
+    assert label == 0 and torch.equal(image, ds[1][0])
+
+
+def test_folders_and_split(tmp_path):
+    """OpenFake files are sorted into data/real/<source>/ and data/fake/<generator>/; real folders of the user are
+    read through their subfolders; the part of an image depends only on "<folder>/<file>"."""
+    from src.data.pool import part
+
+    data, blank = tmp_path / "data", Image.new("RGB", (40, 40))
+    specs = {"train": [(0, "", "openfake/laion")] * 30 + [(1, "gen-a", "openfake")] * 30,
+             "test": [(0, "", "openfake/docci")] * 10 + [(1, "gen-a", "openfake")] * 10}
+    for split, spec in specs.items():
+        folder = data / f"openfake_{split}"
+        folder.mkdir(parents=True)
+        rows = []
+        for i, (label, generator, source) in enumerate(spec):
+            blank.save(folder / f"{i:04d}.png")
+            rows.append({"path": str(folder / f"{i:04d}.png"), "label": label, "generator": generator, "mask": "",
+                         "source": source, "prompt": f"prompt {i}"})
+        save_rows(rows, data / f"openfake_{split}.csv")
+    sort_folders(data)
+    count = lambda folder: len(list(folder.iterdir()))  # noqa: E731
+    assert count(data / "fake" / "gen-a") == 40  # train and test files of the same name are both kept
+    assert count(data / "real" / "laion") == 30 and count(data / "real" / "docci") == 10
+    assert not list((data / "openfake_train").glob("*.png")) and not list((data / "openfake_test").glob("*.png"))
+    rows = load_rows(data / "openfake_test.csv")
+    assert all(Path(r["path"]).exists() for r in rows) and rows[13]["prompt"] == "prompt 13"  # new paths, prompts kept
+    before = sorted(p.name for p in (data / "fake" / "gen-a").iterdir())
+    sort_folders(data)  # again: nothing moves, nothing is renamed twice
+    assert sorted(p.name for p in (data / "fake" / "gen-a").iterdir()) == before
+    assert load_rows(data / "openfake_test.csv") == rows
+
+    mine = tmp_path / "my_reals"
+    (mine / "logos").mkdir(parents=True)
+    (mine / "scans" / "2024").mkdir(parents=True)
+    for i in range(10):
+        blank.save(mine / "logos" / f"{i}.jpg")
+        blank.save(mine / "scans" / "2024" / f"{i}.PNG")
+    blank.save(mine / "top.bmp")
+    (mine / "notes.txt").write_text("not an image")
+    d = {"dir": str(data), "real_dirs": [str(mine)], "val_share": 0.2, "test_share": 0.2, "n_render": 4, "render_train": 0.0}
+    parts = load_pool(d)
+    rows = [r for part_rows in parts.values() for r in part_rows]
+    sources = Counter(r["source"] for r in rows if r["label"] == 0)
+    assert {s: n for s, n in sources.items() if not s.startswith("render/")} == {
+        "laion": 30, "docci": 10, "my_reals/logos": 10, "my_reals/scans": 10, "my_reals": 1}
+    assert sum(n for s, n in sources.items() if s.startswith("render/")) == 4  # test fonts: 2 in val, 2 in test
+    assert Counter(r["generator"] for r in rows if r["label"]) == {"gen-a": 40}
+    assert len({r["path"] for r in rows}) == len(rows) == 105  # every image in exactly one part
+    assert 10 <= len(parts["val"]) <= 32 and 10 <= len(parts["test"]) <= 32  # about a fifth each
+
+    where = {r["path"]: name for name, part_rows in parts.items() for r in part_rows}
+    for i in range(10, 30):
+        blank.save(mine / "logos" / f"{i}.jpg")  # more images later: the old ones stay where they were
+    again = {r["path"]: name for name, part_rows in load_pool(d).items() for r in part_rows}
+    assert len(again) == 125 and all(again[p] == name for p, name in where.items())
+    assert part("/disk1/data/real/laion/7.jpg", 0.2, 0.2) == part("/another/place/laion/7.jpg", 0.2, 0.2)  # data moved
 
 
 def test_compression_history(tmp_path):
@@ -246,12 +319,16 @@ def test_scripts_end_to_end(tmp_path):
         save_rows(rows, data / f"{name}.csv")
 
     sid = [(0, "", "sid/real", False)] * 3 + [(1, "sid-full", "sid/full", False)] * 3 + [(1, "sid-edit", "sid/edit", True)] * 3
-    table("openfake_train", [(0, "", "openfake/laion", False)] * 12 + [(1, "gen-a", "openfake", False)] * 6 + [(1, "gen-b", "openfake", False)] * 6)
-    table("openfake_test", [(0, "", "openfake/docci", False)] * 6 + [(1, "gen-a", "openfake", False)] * 3 + [(1, "gen-new", "openfake", False)] * 3)
+    table("openfake_train", [(0, "", "openfake/laion", False)] * 24 + [(1, "gen-a", "openfake", False)] * 16 + [(1, "gen-b", "openfake", False)] * 16)
+    table("openfake_test", [(0, "", "openfake/docci", False)] * 8 + [(1, "gen-a", "openfake", False)] * 4 + [(1, "gen-new", "openfake", False)] * 8)
+    (tmp_path / "my_reals" / "logos").mkdir(parents=True)  # a folder of the user with real images
+    for i in range(8):
+        Image.fromarray(rng.integers(0, 255, (24, 24, 3), dtype=np.uint8)).resize((300, 200), Image.BICUBIC).save(tmp_path / "my_reals" / "logos" / f"{i}.jpg")
     table("sid_validation", sid)
 
     cfg = {"data": {"dir": "data", "workers": 1, "train": {"n_real": None, "n_per_model": None},
                     "test": {"n_real": 10, "real_sources": ["docci"], "n_per_model": 10},
+                    "real_dirs": [str(tmp_path / "my_reals")], "val_share": 0.2, "test_share": 0.2,
                     "sid": {"n_per_class": 3}, "n_render": 8, "render_train": 0.25},
            "model": {"backbone": "tiny", "shared": 4, "families": {"fam-a": ["gen-a"], "fam-b": ["gen-b"]}},
            "train": {"size": 128, "epochs": 2, "batch_size": 4, "val_size": 4, "lr": 1e-3, "head_lr": 1e-2,
@@ -266,19 +343,18 @@ def test_scripts_end_to_end(tmp_path):
         assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-3000:]
         return done.stdout
 
-    run("download_data.py")  # everything is cached: nothing is downloaded
+    run("download_data.py")  # everything is cached: nothing is downloaded, the images are sorted into folders
+    assert len(list((data / "fake" / "gen-a").iterdir())) == 20 and len(list((data / "real" / "docci").iterdir())) == 8
     train_log = run("run_train.py")
-    assert "incl. 3 renders" in train_log  # 12 reals, 1 for calibration, a quarter of the other 11 drawn
-    assert "10 generated images of 2 generators" in train_log  # the first image of every generator is for validation
-    assert "expert all: 10 generated images of 2 models" in train_log and "expert fam-b: 5 generated images of 1 models" in train_log
-    assert "fam-b: best validation loss" in train_log
+    sizes = {name: (int(n_real), int(n_fake)) for name, n_real, n_fake in
+             re.findall(r"^(train|val|test): (\d+) reals from \d+ sources, (\d+) generated images", train_log, re.M)}
+    assert sum(n for n, _ in sizes.values()) == 24 + 8 + 8 + 8 + round(0.25 * (sizes["train"][0] / 1.25))  # + renders
+    assert sum(n for _, n in sizes.values()) == 44 and min(min(pair) for pair in sizes.values()) > 0
+    assert "known to the general expert only: gen-new" in train_log
+    assert re.search(r"expert all: \d+ generated images of 3 models", train_log)
+    assert re.search(r"expert fam-b: \d+ generated images of 1 models", train_log) and "fam-b: best validation loss" in train_log
     run_dir = tmp_path / "runs" / "experts"
     assert sorted(p.name for p in (run_dir / "experts").iterdir()) == ["all.pt", "fam-a.pt", "fam-b.pt"]
-    assert len(list((data / "renders").glob("train_*"))) == 3  # training fonts, apart from the test renders
-    calibration = json.loads((run_dir / "calibration.json").read_text())
-    train_paths = {r["path"] for r in load_rows(data / "openfake_train.csv")}
-    assert set(calibration["reals"]) <= train_paths and len(calibration["renders"]) == 4
-    assert all(Path(p).name.startswith("test_") for p in calibration["renders"] + calibration["renders_test"])
     again = run("run_train.py", "--resume")  # nothing is left to train
     assert all(f"{name}: trained, skipped" in again for name in ("all", "fam-a", "fam-b")) and "epoch 1" not in again
     only = run("run_train.py", "--only", "fam-a")  # one expert again, on the same trunk
@@ -288,19 +364,21 @@ def test_scripts_end_to_end(tmp_path):
     report_md = (run_dir / "report.md").read_text()
     thr = json.loads((run_dir / "thresholds.json").read_text())
     assert list(thr) == ["all", "fam-a", "fam-b"]
-    assert report_md.startswith("thresholds for 10% FPR on 5 calibration reals: all ")
+    assert re.match(r"thresholds for 10% FPR on \d+ validation reals: all ", report_md)
+    assert f"Test part: {sizes['test'][0]} reals and {sizes['test'][1]} generated images" in report_md
     assert "| only the general one |" in report_md and "| only the families |" in report_md
-    assert "| gen-a (in train) |" in report_md and "| gen-new |" in report_md and "| sid-edit |" in report_md
+    assert "| laion |" in report_md and "| sid/real |" in report_md and "| sid-edit |" in report_md
     experts = [line.split("|")[4].strip() for line in report_md.splitlines() if line.startswith(("| gen-", "| sid-"))]
-    assert len(experts) == 4 and set(experts) <= set(thr)
+    assert len(experts) >= 4 and set(experts) <= set(thr)
 
     import matplotlib  # the predict notebook, cell by cell, with the trained tiny model
     matplotlib.use("Agg")
     (tmp_path / "configs").mkdir()
     (tmp_path / "configs" / "train.yaml").write_text(yaml.safe_dump(cfg))
     (tmp_path / "my_images").mkdir()
-    Image.open(data / "openfake_test" / "7.png").save(tmp_path / "my_images" / "example.jpg")
-    Image.open(data / "openfake_test" / "7.png").save(tmp_path / "my_images" / "example.png")
+    sample = sorted((data / "real" / "docci").iterdir())[0]
+    Image.open(sample).save(tmp_path / "my_images" / "example.jpg")
+    Image.open(sample).save(tmp_path / "my_images" / "example.png")
     def notebook(name):
         nb = json.loads((repo / "notebooks" / name).read_text(encoding="utf-8"))
         cwd = Path.cwd()
@@ -320,9 +398,9 @@ def test_scripts_end_to_end(tmp_path):
     for p in sorted((tmp_path / "my_images").iterdir()):  # the notebook prepares an image exactly as run_test.py
         assert torch.equal(ns["prepare"](p), ImageDataset([{"path": str(p), "label": 0}], cfg["train"]["size"])[0][0])
 
-    ns = notebook("tsne.ipynb")  # every test group, all its images here (fewer than n)
-    assert set(ns["names"]) == {"openfake/docci", "gen-a", "gen-new", "sid/real", "sid-full", "sid-edit", "renders"}
-    assert ns["points"].shape == (25, 2) and ns["vectors"].shape == (25, 64)
+    ns = notebook("tsne.ipynb")  # every group of the test part and of SID_Set, all its images here (fewer than n)
+    assert {"laion", "gen-a", "sid/real", "sid-full", "sid-edit"} <= set(ns["names"])
+    assert ns["points"].shape == (len(ns["names"]), 2) and ns["vectors"].shape == (len(ns["names"]), 64)
 
 
 def test_store_and_renders(tmp_path):

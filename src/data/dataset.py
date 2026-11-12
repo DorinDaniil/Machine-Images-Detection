@@ -15,7 +15,7 @@ import warnings
 
 import numpy as np
 import torch
-from PIL import Image, ImageFilter, features
+from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageOps, features
 from torch.utils.data import Dataset
 
 RESAMPLE = (Image.BILINEAR, Image.BICUBIC, Image.LANCZOS)
@@ -37,23 +37,36 @@ def compress(image: Image.Image, fmt: str = "JPEG", quality: int = 90, subsampli
 
 
 def degrade(image: Image.Image, rng: np.random.Generator) -> Image.Image:
-    """What images get on the way through the internet, size kept. Same probabilities for real and fake."""
-    if rng.random() < 0.2:  # resampled and brought back to the same size
+    """What images get on the way through the internet, size kept. Same probabilities for real and fake.
+    First what an author does (colour, sharpening, something pasted on top), then what sharing does
+    (resampling, blur, noise, compression). About a third of the views get nothing but the compression."""
+    if rng.random() < 0.25:  # filters and auto-correction: brightness, contrast, saturation
+        for enhance in (ImageEnhance.Brightness, ImageEnhance.Contrast, ImageEnhance.Color):
+            image = enhance(image).enhance(rng.uniform(0.8, 1.2))
+    if rng.random() < 0.03:
+        image = ImageOps.grayscale(image).convert("RGB")
+    if rng.random() < 0.1:  # sharpening, as phone cameras and many resizers do
+        image = image.filter(ImageFilter.UnsharpMask(rng.uniform(1, 2), int(rng.integers(50, 150)), 2))
+    if rng.random() < 0.1:  # a flat patch of 1-16 % of the image: sticker, caption bar, censored face
+        w, h = (int(side * rng.uniform(0.1, 0.4)) for side in image.size)
+        x, y = int(rng.integers(0, image.width - w + 1)), int(rng.integers(0, image.height - h + 1))
+        ImageDraw.Draw(image).rectangle((x, y, x + w, y + h), fill=tuple(int(v) for v in rng.integers(0, 256, 3)))
+    if rng.random() < 0.25:  # resampled and brought back to the same size
         s = rng.uniform(0.5, 0.9) if rng.random() < 0.7 else rng.uniform(1.2, 2.0)
         size = image.size
         image = image.resize((max(1, round(size[0] * s)), max(1, round(size[1] * s))), RESAMPLE[rng.integers(3)])
         image = image.resize(size, RESAMPLE[rng.integers(3)])
-    if rng.random() < 0.1:
-        image = image.filter(ImageFilter.GaussianBlur(rng.uniform(0.3, 1.2)))
+    if rng.random() < 0.15:
+        image = image.filter(ImageFilter.GaussianBlur(rng.uniform(0.3, 1.5)))
     if rng.random() < 0.2:  # sensor-like noise, so "noisy = real" is not a shortcut
         noise = rng.standard_normal((image.height, image.width, 1), dtype=np.float32) * rng.uniform(0.5, 4)
         x = np.asarray(image, dtype=np.float32) + noise
         image = Image.fromarray(np.clip(x.round(), 0, 255).astype(np.uint8))
     # compression, always: JPEG or WebP, sometimes a second JPEG as after re-sharing
     if WEBP and rng.random() < 0.2:
-        image = compress(image, "WEBP", rng.integers(60, 96))
+        image = compress(image, "WEBP", rng.integers(50, 96))
     else:
-        image = compress(image, "JPEG", rng.integers(60, 96), subsampling=rng.choice([0, 2]))
+        image = compress(image, "JPEG", rng.integers(50, 96), subsampling=rng.choice([0, 2]))
     if rng.random() < 0.25:
         image = compress(image, "JPEG", rng.integers(70, 96))
     return image
@@ -90,10 +103,11 @@ class ImageDataset(Dataset):
     train=True, in this order:
       read      one JPEG pass first if the file is not a JPEG (see the module docstring);
       crop      a random part of the image (random_crop);
-      degrade   at the image's own resolution (above MAX_SIDE shrunk to it first): resampling, blur, noise,
-                then JPEG / WebP compression, always;
+      degrade   at the image's own resolution (above MAX_SIDE shrunk to it first): colour, sharpening, a flat
+                patch, resampling, blur, noise, then JPEG / WebP compression, always;
       resize    to size x size, aspect not kept, with a random resampling filter;
-      flip      horizontal, half of the views.
+      flip      horizontal, half of the views; a turn by 90, 180 or 270 degrees, 5 % of the views.
+    A file that cannot be read is reported and the next image is returned instead of it.
     """
 
     def __init__(self, rows: list[dict], size: int = 512, train: bool = False, seed: int = 0):
@@ -103,9 +117,16 @@ class ImageDataset(Dataset):
         return len(self.rows)
 
     def __getitem__(self, i):
+        try:
+            return self.view(i), self.rows[i]["label"]
+        except Exception as e:  # one broken file must not stop hours of training
+            print(f"unreadable, skipped: {self.rows[i]['path']} ({e!r})")
+            return self[(i + 1) % len(self)]
+
+    def view(self, i) -> torch.Tensor:
         row, size = self.rows[i], (self.size, self.size)
         if not self.train:
-            return to_tensor(load(row["path"]).resize(size, Image.BICUBIC)), row["label"]
+            return to_tensor(load(row["path"]).resize(size, Image.BICUBIC))
         rng = np.random.default_rng([self.seed, self.epoch, i])
         image = random_crop(load(row["path"], rng), rng)
         s = MAX_SIDE / max(image.size)
@@ -114,4 +135,6 @@ class ImageDataset(Dataset):
         image = degrade(image, rng).resize(size, RESAMPLE[rng.integers(3)])
         if rng.random() < 0.5:
             image = image.transpose(Image.FLIP_LEFT_RIGHT)
-        return to_tensor(image), row["label"]
+        if rng.random() < 0.05:
+            image = image.transpose([Image.ROTATE_90, Image.ROTATE_180, Image.ROTATE_270][rng.integers(3)])
+        return to_tensor(image)

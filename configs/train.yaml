@@ -2,14 +2,14 @@
 # a shared trunk (DINOv3 ConvNeXt-Tiny), a general expert over every generator and one expert per generator
 # family. Every expert is trained on its own, "its generators against the reals", and also names the exact model.
 # An image is called generated when any expert is above its own threshold. Whole images resized to 512 x 512.
-# Test on newer generators, other real sources, local edits and non-photo reals.
-# Data: 300k reals, up to 10k images of each of 36 generators; 3.3 TB downloaded, ~0.6 TB kept.
+# Data: one pool of folders, data/real/<source>/ and data/fake/<generator>/, plus your own folders with reals.
+# 85 % of every folder is for training, 5 % for validation and the thresholds, 10 % for the test.
 
 data:
   dir: data
   workers: 4                # OpenFake files downloaded at once, ~5.4 GB of temporary disk each
   train:                    # OpenFake core/train: 608 files of ~3800 rows; images kept as original bytes
-    n_real: 300000          # LAION and Pexels photos; 15 % are kept apart for calibration. null: all (~590k usable)
+    n_real: 300000          # LAION and Pexels photos. null: all (~590k usable)
     n_per_model: 10000      # cap per generator; smaller generators give all they have. null: no cap
     generators:             # null: all 72. 36 listed: API models, open flagships, the most used community
       # API
@@ -54,13 +54,21 @@ data:
       - ltxv-2.3
     max_files: null         # null: all 608 files (3.3 TB); 200 files (1.1 TB) still fill 5000 for the frequent
                             #   generators but give only a third of the rare ones (nano-banana-2, seedream, video)
-  test:                     # OpenFake core/test: 13 files, 68 GB; newer generators, DOCCI reals
-    n_real: 5000
-    real_sources: [docci]
-    n_per_model: 1000
-  sid:                      # SID_Set validation: the test of local edits
+  test:                     # OpenFake core/test, 13 files, 68 GB: newer generators (GPT Image 1.5 and 2, Nano Banana
+    n_real: 5000            #   Pro, Midjourney 7, ...) and DOCCI reals. They join the same pool as core/train.
+    real_sources: [docci]   #   To take more of them: raise the quotas, delete data/openfake_test and
+    n_per_model: 1000       #   data/openfake_test.csv, run download_data.py again
+  real_dirs: []             # more folders with real images, e.g. [/data/logos, /data/scans]: every image under them,
+                            #   through all subfolders, joins the reals. The report has a line per <folder>/<subfolder>.
+                            #   A folder put into data/real/ is picked up the same way
+  val_share: 0.05           # of every folder, by the hash of "<folder>/<file>": the best epoch of every expert and
+                            #   the thresholds
+  test_share: 0.10          # of every folder, never trained on: report.md. The split is the same on every run,
+                            #   an image keeps its part when images are added
+  sid:                      # SID_Set validation, another dataset: the test of local edits
     n_per_class: 1000
-  n_render: 1000            # rendered text / UI / charts / logos: half for calibration, half for FPR test
+  n_render: 1000            # rendered text / UI / charts / logos in fonts not used in training: half joins the
+                            #   validation reals, half the test reals
   render_train: 0.05        # more of them (other fonts) as training reals: this share of the training reals (~13k,
                             #   ~10 min to draw once, ~1.2 GB): fewer false positives on screenshots, documents, logos
 
@@ -70,30 +78,35 @@ model:
                             #   expert owns a copy of the last stage (15M parameters, ~25 ms on a CPU).
                             #   3: the two last stages per expert; 0: every expert is a whole separate network
   families:                 # one expert per family: the generators of one maker or one architecture against the
-                            #   reals. A new version of a known family is caught by its expert. Regroup freely:
-                            #   every generator of data.train.generators must be in exactly one family.
+                            #   reals. A new version of a known family is caught by its expert. Regroup freely;
+                            #   a generator is the name of a folder in data/fake.
                             #   run_train.py adds the general expert "all": every generator, trained first
-    openai: [gpt-image-1, dalle-3]
-    google: [imagen-3.0-002, imagen-4.0, nano-banana-2]
-    midjourney: [midjourney-6]
-    ideogram: [ideogram-3.0]
-    xai: [grok-2-image-1212, grok-imagine]
-    seedream: [seedream-v4.0, seedream-v4.5]                  # ByteDance
-    qwen: [qwen-image]                                        # Alibaba
-    flux: [flux-1.1-pro, flux.1-dev, flux.1-schnell, flux.2-dev, flux.2-klein-4b, chroma, mystic,
+    openai: [gpt-image-1, gpt-image-1.5, gpt-image-2, dalle-3]
+    google: [imagen-3.0-002, imagen-4.0, nano-banana-2, nano-banana-pro]
+    midjourney: [midjourney-6, midjourney-7]
+    ideogram: [ideogram-2.0, ideogram-3.0]
+    xai: [grok-2-image-1212, grok-imagine, aurora-20-1-25]
+    seedream: [seedream-v4.0, seedream-v4.5, seedream-v5.0]             # ByteDance
+    qwen: [qwen-image, z-image-turbo]                                   # Alibaba
+    flux: [flux-1.1-pro, flux.1-dev, flux.1-schnell, flux.2-dev, flux.2-klein-4b, flux.2-klein-9b, chroma, mystic,
            flux-amateursnapshotphotos, amateur-photography-v6]
     sd: [sd-1.5, sd-2.1, sd-1.5-dreamshaper, realistic_vision_v5.1_novae]
     sdxl: [sdxl, sdxl-juggernaut, sdxl-realvis-v5, sdxl-epic-realism, playground-v2.5-1024px-aesthetic]
-    dit: [sd-3.5, hidream-i1-full]                            # other open diffusion transformers
-    video_cn: [wan-video-2.2, wan-video-2.1, hunyuan-video]   # frames of the Chinese video models
-    ltx: [ltxv-2.3]                                           # frames of LTX Video
+    dit: [sd-3.5, hidream-i1-full, lumina-17-2-25]                      # other open diffusion transformers
+    video_cn: [wan-video-2.1, wan-video-2.2, wan-video-2.5, hunyuan-video]   # frames of the Chinese video models
+    video: [veo-3, sora-2, ltxv-2.3]                                    # frames of the other video models
+    # A generator of data/fake that is in no family is learnt by the general expert only. Now these are the ones
+    # with too few images for an expert of their own: recraft-v2, recraft-v3, ernie-image, ernie-image-turbo,
+    # frames-23-1-25 (Runway), halfmoon-4-4-25 (Reve)
 
 train:
   size: 512                 # every image, whole, resized to 512 x 512 (aspect not kept), in training and testing;
                             #   ImageNet mean / std are applied inside the model. Training views (src/data/dataset.py):
                             #   one JPEG pass first if the file is not a JPEG; a random part of 50-100 % of the image,
-                            #   aspect 1:2-2:1; resampling 20 %, blur 10 %, noise 20 %; JPEG q60-95 or WebP (20 %),
-                            #   a second JPEG 25 %; the resize; flip
+                            #   aspect 1:2-2:1; colour 25 %, grey 3 %, sharpening 10 %, a flat patch 10 %,
+                            #   resampling 25 %, blur 15 %, noise 20 %; JPEG q50-95 or WebP (20 %), a second JPEG 25 %;
+                            #   the resize; flip, a turn by 90 degrees 5 %. A third of the views get only the
+                            #   crop and the compression
   epochs: 3                 # per expert. An epoch: every generated image of the expert once and as many reals,
                             #   drawn anew every epoch; then validation, metrics/<name>.csv and state.pt.
                             #   In all every generated image is seen 6 times: 3 by "all", 3 by its family expert
@@ -105,8 +118,8 @@ train:
   weight_decay: 0.05
   num_workers: 8
   device: cuda
-  out: runs/experts         # trunk.pt, experts/<name>.pt, metrics/<name>.csv, calibration.json, thresholds.json, report.md
+  out: runs/experts         # trunk.pt, experts/<name>.pt, metrics/<name>.csv, thresholds.json, report.md
 
 test:
-  alpha: 0.01               # target false-positive rate of the whole ensemble; thresholds from calibration reals only
-  max_calib: 10000          # calibration reals used (of the 15 % held out): enough for a 1 % threshold
+  alpha: 0.01               # target false-positive rate of the whole ensemble; thresholds from validation reals only
+  max_calib: 10000          # validation reals used for the thresholds: enough for 1 %
