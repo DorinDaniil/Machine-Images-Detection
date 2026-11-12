@@ -20,7 +20,7 @@ from src.evaluate import predict, report, thresholds, verdict
 from src.model import Detector, score
 from src.train import stats, train, trained
 
-CFG = dict(device="cpu", size=96, batch_size=2, num_workers=0, lr=1e-3, head_lr=1e-2, weight_decay=0.0, epochs=2)
+CFG = dict(device="cpu", size=96, batch_size=2, num_workers=0, lr=1e-3, head_lr=1e-2, weight_decay=0.0, epochs=2, save_every=3)
 
 
 def make_rows(root, n=8, size=200):
@@ -116,11 +116,11 @@ def test_pipeline(tmp_path):
 
 
 def test_train_resume(tmp_path, monkeypatch):
-    """A crash in the middle of epoch 2; resume goes on from the state saved after epoch 1."""
+    """A crash at the last step of epoch 2; resume goes on from the state saved after its step 3 (save_every = 3)."""
     import src.train
 
     class Crash(ImageDataset):  # fails on the `at`-th training image, like a power cut
-        reads, at = 0, 10
+        reads, at = 0, 16
 
         def __getitem__(self, i):
             Crash.reads += self.train
@@ -132,17 +132,18 @@ def test_train_resume(tmp_path, monkeypatch):
     rows = make_rows(tmp_path)
     reals, fakes = [r for r in rows if r["label"] == 0], [r for r in rows if r["label"]]
     cfg, run = dict(CFG, out=str(tmp_path / "run")), tmp_path / "run"
-    with pytest.raises(RuntimeError, match="power cut"):  # 8 images of epoch 1, then the 2nd of epoch 2
+    with pytest.raises(RuntimeError, match="power cut"):  # 4 steps of 2 images in an epoch: the 4th step of epoch 2
         train(Detector("tiny", 4, {"all": ["gen0", "gen1"]}), "all", reals, fakes, rows[:4], cfg)
     state = torch.load(run / "state.pt", weights_only=False)
-    assert state["name"] == "all" and state["epoch"] == 2 and len(state["log"]) == 1 and state["scheduler"]["last_epoch"] == 4
-    assert not trained(run, "all", 2)
+    assert state["name"] == "all" and (state["epoch"], state["step"]) == (2, 3)
+    assert len(state["log"]) == 1 and state["scheduler"]["last_epoch"] == 7 and not trained(run, "all", 2)
 
     Crash.at = 0
     resumed = Detector("tiny", 4, {"all": ["gen0", "gen1"]})  # as a new process: weights come from the state
     train(resumed, "all", reals, fakes, rows[:4], cfg, resume=True)
     state = torch.load(run / "state.pt", weights_only=False)
-    assert state["epoch"] == 3 and state["scheduler"]["last_epoch"] == 8 and trained(run, "all", 2)
+    assert (state["epoch"], state["step"]) == (3, 0) and trained(run, "all", 2)
+    assert state["scheduler"]["last_epoch"] == 8 and Crash.reads == 16 + 2  # only the one step that was left
     epochs = [line.split(",")[0] for line in (run / "metrics" / "all.csv").read_text().splitlines()[1:]]
     assert epochs == ["1", "2"]
     assert all(torch.equal(v, state["expert"][k]) for k, v in resumed.experts["all"].state_dict().items())
@@ -325,7 +326,7 @@ def test_scripts_end_to_end(tmp_path):
                     "sid": {"n_per_class": 3}, "n_render": 8, "render_train": 0.25},
            "model": {"backbone": "tiny", "shared": 4, "families": {"fam-a": ["gen-a"], "fam-b": ["gen-b"]}},
            "train": {"size": 128, "epochs": 2, "batch_size": 4, "val_size": 4, "lr": 1e-3, "head_lr": 1e-2,
-                     "weight_decay": 0.0, "num_workers": 0, "device": "cpu", "out": "runs/experts"},
+                     "weight_decay": 0.0, "save_every": 2, "num_workers": 0, "device": "cpu", "out": "runs/experts"},
            "test": {"alpha": 0.1, "max_calib": 6}}
     (tmp_path / "tiny.yaml").write_text(yaml.safe_dump(cfg))
 

@@ -117,6 +117,7 @@ train:
   lr: 5.0e-5                # the trunk and the last stage
   head_lr: 1.0e-3           # the linear layer
   weight_decay: 0.05
+  save_every: 2000          # steps between the saves of state.pt inside an epoch: after a stop --resume goes on from the last one
   num_workers: 8
   device: cuda
   out: runs/experts         # trunk.pt, experts/<name>.pt, metrics/<name>.csv, thresholds.json, report.md

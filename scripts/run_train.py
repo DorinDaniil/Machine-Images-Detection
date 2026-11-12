@@ -6,7 +6,8 @@ val (5 %) and test (10 %); rendered text / UI / charts / logos join the reals. T
     family    the generators of one family (model.families) against the reals, on the frozen trunk,
               starting as a copy of "all"
 Every expert is saved to <out>/experts/<name>.pt at its best validation epoch.
---resume  after a crash or Ctrl+C: trained experts are skipped, the unfinished one goes on from its last epoch
+--resume  after a crash or Ctrl+C: trained experts are skipped, the unfinished one goes on from its last saved
+          state (after every epoch and every train.save_every steps)
 --only    train only these experts, e.g. a family added to the config later. After "all" is retrained every
           family expert has to be retrained too: they stand on its trunk
 """

@@ -1,6 +1,7 @@
 import csv
 import math
 import random
+from itertools import islice
 from pathlib import Path
 
 import torch
@@ -51,8 +52,9 @@ def train(model: Detector, name: str, reals: list, fakes: list, val: list, cfg: 
     the trunk, any other expert on the frozen trunk. cfg = the `train` block of configs/train.yaml.
 
     An epoch: every fake of the expert once and as many reals, drawn anew every epoch. Then validation,
-    metrics to <out>/metrics/<name>.csv, the training state to <out>/state.pt (resume=True goes on from it)
-    and, if the validation loss is the lowest so far, the expert to <out>/experts/<name>.pt."""
+    metrics to <out>/metrics/<name>.csv and, if the validation loss is the lowest so far, the expert to
+    <out>/experts/<name>.pt. The training state goes to <out>/state.pt after every epoch and every
+    cfg["save_every"] steps inside it; resume=True goes on from it, the rest of an unfinished epoch drawn anew."""
     device = cfg["device"] if torch.cuda.is_available() else "cpu"
     out = Path(cfg["out"])
     (out / "metrics").mkdir(parents=True, exist_ok=True)
@@ -72,7 +74,7 @@ def train(model: Detector, name: str, reals: list, fakes: list, val: list, cfg: 
     schedule = lambda step: min(1.0, (step + 1) / warmup) * 0.5 * (1 + math.cos(math.pi * step / total))  # noqa: E731
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, schedule)
 
-    best, log, start = math.inf, [], 1
+    best, log, start, done = math.inf, [], 1, 0  # done: steps of epoch `start` that are behind
     if resume and (out / "state.pt").exists():
         state = torch.load(out / "state.pt", map_location="cpu", weights_only=False)
         if state["name"] == name:
@@ -80,8 +82,14 @@ def train(model: Detector, name: str, reals: list, fakes: list, val: list, cfg: 
             expert.load_state_dict(state["expert"])
             optimizer.load_state_dict(state["optimizer"])
             scheduler.load_state_dict(state["scheduler"])
-            best, log, start = state["best"], state["log"], state["epoch"]
-            print(f"{name}: resuming from epoch {start}")
+            best, log, start, done = state["best"], state["log"], state["epoch"], state.get("step", 0)
+            print(f"{name}: resuming from epoch {start}, step {done + 1}")
+
+    def save_state(epoch, step):  # the next step to make is `step` + 1 of `epoch`
+        torch.save({"name": name, "trunk": model.trunk.state_dict(), "expert": expert.state_dict(),
+                    "optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(),
+                    "best": best, "log": log, "epoch": epoch, "step": step}, out / "state.tmp")
+        (out / "state.tmp").replace(out / "state.pt")  # a crash while saving leaves the previous state whole
 
     for epoch in range(start, epochs + 1):
         model.train()
@@ -89,7 +97,7 @@ def train(model: Detector, name: str, reals: list, fakes: list, val: list, cfg: 
         loader = DataLoader(ImageDataset(rows, cfg["size"], train=True, seed=epoch), batch_size=batch_size, shuffle=True,
                             drop_last=True, num_workers=cfg["num_workers"], pin_memory=device == "cuda")
         logits, labels = [], []
-        for step, (image, label) in enumerate(loader, 1):
+        for step, (image, label) in enumerate(islice(loader, steps - done), done + 1):
             with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device == "cuda"):
                 out_logits = model(image.to(device), [name])[name].float()
             loss = F.cross_entropy(out_logits, label.to(device))
@@ -102,6 +110,9 @@ def train(model: Detector, name: str, reals: list, fakes: list, val: list, cfg: 
             labels.append(label)
             if step % 50 == 0:
                 print(f"{name} epoch {epoch} step {step}/{steps} loss {loss.item():.4f}")
+            if step % cfg["save_every"] == 0 and step < steps:
+                save_state(epoch, step)
+        done = 0
 
         train_stats, val_stats = stats(torch.cat(logits), torch.cat(labels)), validate(model, name, val_loader, device)
         print(f"{name} epoch {epoch}: train {fmt(train_stats)}")
@@ -111,10 +122,7 @@ def train(model: Detector, name: str, reals: list, fakes: list, val: list, cfg: 
         if val_stats["loss"] <= best:
             best = val_stats["loss"]
             model.save(out, name)
-        torch.save({"name": name, "trunk": model.trunk.state_dict(), "expert": expert.state_dict(),
-                    "optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(),
-                    "best": best, "log": log, "epoch": epoch + 1}, out / "state.tmp")
-        (out / "state.tmp").replace(out / "state.pt")  # a crash while saving leaves the previous state whole
+        save_state(epoch + 1, 0)
         with open(out / "metrics" / f"{name}.csv", "w", newline="") as f:  # written last: all its rows = the expert is trained
             writer = csv.DictWriter(f, log[0].keys())
             writer.writeheader()
