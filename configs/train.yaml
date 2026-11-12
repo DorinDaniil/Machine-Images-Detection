@@ -8,9 +8,13 @@
 data:
   dir: data
   workers: 4                # OpenFake files downloaded at once, ~5.4 GB of temporary disk each
-  train:                    # OpenFake core/train: 608 files of ~3800 rows; images kept as original bytes
-    n_real: 300000          # LAION and Pexels photos. null: all (~590k usable)
-    n_per_model: 10000      # cap per generator; smaller generators give all they have. null: no cap
+  train:                    # OpenFake core/train: 608 files of ~3800 rows; images kept as original bytes.
+                            #   Every file is read whatever the quotas are: 3.3 TB of traffic. Kept on disk with
+                            #   these quotas: ~1.2 TB (estimate)
+    n_real: null            # LAION and Pexels photos: all usable ones, ~590k. A number: that many
+    n_per_model: 30000      # cap per generator; smaller generators give all they have. Estimated from the public
+                            #   statistics of the dataset: 30000 -> ~580k images, all of nearly every API model
+                            #   (10000 -> ~285k; null, no cap -> ~1M, half of them SD 3.5, SD 2.1 and FLUX.1-dev)
     generators:             # null: all 72. 36 listed: API models, open flagships, the most used community
       # API
       - gpt-image-1         #   fine-tunes, frames of video models. Left out: duplicates of the same model under
@@ -54,10 +58,14 @@ data:
       - ltxv-2.3
     max_files: null         # null: all 608 files (3.3 TB); 200 files (1.1 TB) still fill 5000 for the frequent
                             #   generators but give only a third of the rare ones (nano-banana-2, seedream, video)
-  test:                     # OpenFake core/test, 13 files, 68 GB: newer generators (GPT Image 1.5 and 2, Nano Banana
-    n_real: 5000            #   Pro, Midjourney 7, ...) and DOCCI reals. They join the same pool as core/train.
-    real_sources: [docci]   #   To take more of them: raise the quotas, delete data/openfake_test and
-    n_per_model: 1000       #   data/openfake_test.csv, run download_data.py again
+  test:                     # OpenFake core/test, 13 files, 68 GB: newer generators and DOCCI reals, all of them.
+    n_real: null            #   They join the same pool as core/train
+    real_sources: [docci]   # not ImageNet: most of its images are below 512 px
+    n_per_model: null
+    generators: [gpt-image-1.5, gpt-image-2, nano-banana-pro, midjourney-7, flux.2-klein-9b, z-image-turbo,
+                 seedream-v5.0, ideogram-2.0, aurora-20-1-25, lumina-17-2-25, recraft-v2, recraft-v3, ernie-image,
+                 ernie-image-turbo, frames-23-1-25, halfmoon-4-4-25, veo-3, sora-2, wan-video-2.5]
+                            # null: every generator of the split, also illustrious (anime: left out as in train)
   real_dirs: []             # more folders with real images, e.g. [/data/logos, /data/scans]: every image under them,
                             #   through all subfolders, joins the reals. The report has a line per <folder>/<subfolder>.
                             #   A folder put into data/real/ is picked up the same way
