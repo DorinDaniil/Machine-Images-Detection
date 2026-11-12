@@ -59,3 +59,26 @@ def load_pool(d: dict) -> dict:
         print(f"{name}: {n[0]} reals from {len({r['source'] for r in part_rows if not r['label']})} sources, "
               f"{n[1]} generated images of {len({r['generator'] for r in part_rows if r['label']})} generators")
     return parts
+
+
+def data_table(parts: dict, families: dict) -> str:
+    """The data as a table: a line per real source and per generator (with its family), the number of its images
+    in train, val and test and the share of them stored as JPEG; after each kind, its total."""
+    family = {g: name for name, models in families.items() for g in models}
+    count, jpeg = {}, Counter()
+    for name, rows in parts.items():
+        for r in rows:
+            key = (r["label"], family.get(r["generator"], "") if r["label"] else "", r["generator"] or r["source"])
+            count.setdefault(key, Counter())[name] += 1
+            jpeg[key] += r["path"].lower().endswith((".jpg", ".jpeg"))
+
+    def line(title, fam, n, n_jpeg):
+        total = sum(n.values())
+        return f"| {title} | {fam} | {n['train']} | {n['val']} | {n['test']} | {total} | {n_jpeg / max(total, 1):.0%} |"
+
+    lines = ["| images | family | train | val | test | all | JPEG |", "|---|---|---|---|---|---|---|"]
+    for label, kind in ((0, "real"), (1, "fake")):
+        keys = sorted((k for k in count if k[0] == label), key=lambda k: (not k[1], k))  # by family; no family last
+        lines += [line(f"{kind}: {k[2]}", k[1], count[k], jpeg[k]) for k in keys]
+        lines.append(line(f"**all {kind}**", "", sum((count[k] for k in keys), Counter()), sum(jpeg[k] for k in keys)))
+    return "\n".join(lines)

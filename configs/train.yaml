@@ -119,7 +119,7 @@ train:
   weight_decay: 0.05
   num_workers: 8
   device: cuda
-  out: runs/experts         # trunk.pt, experts/<name>.pt, metrics/<name>.csv, thresholds.json, report.md
+  out: runs/experts         # trunk.pt, experts/<name>.pt, metrics/<name>.csv, data.md, thresholds.json, report.md
 
 test:
   alpha: 0.01               # target false-positive rate of the whole ensemble; thresholds from validation reals only

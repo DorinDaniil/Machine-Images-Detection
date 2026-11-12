@@ -5,7 +5,7 @@ val (5 %) and test (10 %); rendered text / UI / charts / logos join the reals. T
     all       every generator against the reals, trained together with the trunk -> <out>/trunk.pt
     family    the generators of one family (model.families) against the reals, on the frozen trunk,
               starting as a copy of "all"
-Every expert is saved to <out>/experts/<name>.pt at its best validation epoch.
+Every expert is saved to <out>/experts/<name>.pt at its best validation epoch. <out>/data.md: the table of the data.
 --resume  after a crash or Ctrl+C: trained experts are skipped, the unfinished one goes on from its last epoch
 --only    train only these experts, e.g. a family added to the config later. After "all" is retrained every
           family expert has to be retrained too: they stand on its trunk
@@ -21,7 +21,7 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.stdout.reconfigure(line_buffering=True)  # every line at once, also through `| tee`
 
-from src.data import load_pool  # noqa: E402
+from src.data import data_table, load_pool  # noqa: E402
 from src.model import Detector  # noqa: E402
 from src.train import train, trained  # noqa: E402
 
@@ -36,6 +36,9 @@ out = Path(t["out"])
 out.mkdir(parents=True, exist_ok=True)
 
 parts = load_pool(d)
+stats = data_table(parts, m["families"])  # what this run is trained and tested on
+print(stats)
+(out / "data.md").write_text(stats + "\n", encoding="utf-8")
 reals = {k: [r for r in rows if r["label"] == 0] for k, rows in parts.items()}
 fakes = {k: [r for r in rows if r["label"] == 1] for k, rows in parts.items()}
 for rows in (reals["val"], fakes["val"]):  # folder order -> mixed, the first val_size of them are used
