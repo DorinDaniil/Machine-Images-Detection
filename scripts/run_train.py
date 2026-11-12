@@ -1,10 +1,14 @@
-"""python scripts/run_train.py --config configs/train.yaml [--resume]
+"""python scripts/run_train.py --config configs/train.yaml [--resume] [--only google,qwen]
 
 OpenFake core/train (reals + generators) -> 15 % of the reals kept apart for calibration -> rendered text / UI /
-charts / logos added to the other reals (render_train) -> every generator gets the number of its family
-(model.families) -> family-balanced training of a DINOv3 with one head per family, whole images resized
-to size x size, augmented -> <out>/best.pt
---resume: go on from <out>/state.pt after a crash or Ctrl+C (saved every epoch)
+charts / logos added to the other reals (render_train) -> the experts, one after another:
+    all       every generator against the reals, trained together with the trunk -> <out>/trunk.pt
+    family    the generators of one family (model.families) against the reals, on the frozen trunk,
+              starting as a copy of "all"
+Every expert is saved to <out>/experts/<name>.pt at its best validation epoch.
+--resume  after a crash or Ctrl+C: trained experts are skipped, the unfinished one goes on from its last epoch
+--only    train only these experts, e.g. a family added to the config later. After "all" is retrained every
+          family expert has to be retrained too: they stand on its trunk
 """
 
 import argparse
@@ -19,13 +23,14 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.stdout.reconfigure(line_buffering=True)  # every line at once, also through `| tee`
 
-from src.data import ImageDataset, openfake, render_folder  # noqa: E402
+from src.data import openfake, render_folder  # noqa: E402
 from src.model import Detector  # noqa: E402
-from src.train import train  # noqa: E402
+from src.train import train, trained  # noqa: E402
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--config", default="configs/train.yaml")
-parser.add_argument("--resume", action="store_true", help="go on from <out>/state.pt")
+parser.add_argument("--resume", action="store_true", help="skip trained experts, go on with the unfinished one")
+parser.add_argument("--only", default="", help="experts to train, comma-separated; default: all of them")
 args = parser.parse_args()
 cfg = yaml.safe_load(open(args.config))
 d, m, t = cfg["data"], cfg["model"], cfg["train"]
@@ -44,26 +49,35 @@ reals += [{"path": str(it["path"]), "label": 0, "generator": "", "mask": "", "so
 
 renders = [str(it["path"]) for it in render_folder(data / "renders", d["n_render"], "test")]
 json.dump({"reals": [r["path"] for r in calib], "renders": renders[: len(renders) // 2],
-           "renders_test": renders[len(renders) // 2:]}, open(out / "calibration.json", "w"), indent=1)  # next to best.pt
+           "renders_test": renders[len(renders) // 2:]}, open(out / "calibration.json", "w"), indent=1)  # next to the experts
 
-families = list(m["families"])
-number = {g: k for k, name in enumerate(families, 1) for g in m["families"][name]}  # label: 0 real, k = family k
-missing = sorted({r["generator"] for r in fakes} - set(number))
+experts = {"all": [g for models in m["families"].values() for g in models], **m["families"]}
+missing = sorted({r["generator"] for r in fakes} - set(experts["all"]))
 assert not missing, f"generators without a family in model.families: {missing}"
+
+# validation: some of the reals, and the first and then every 20th image of every generator
+random.Random(1).shuffle(reals)
+n_val = t.get("val_size", 5000) // 2
+val_reals, reals = reals[:n_val], reals[n_val:]
+val_fakes, train_fakes, count = [], [], Counter()
 for r in fakes:
-    r["label"] = number[r["generator"]]
-counts = Counter(r["label"] for r in fakes)
-print("images per family: " + ", ".join(f"{name} {counts[k]}" for k, name in enumerate(families, 1)))
+    count[r["generator"]] += 1
+    (val_fakes if count[r["generator"]] % 20 == 1 else train_fakes).append(r)
+print(f"{len(reals)} train reals incl. {n_drawn} renders, {len(train_fakes)} generated images of {len(count)} generators; "
+      f"calibration {len(calib)} reals; whole images resized to {t['size']} x {t['size']}, batch {t['batch_size']}")
 
-pool = reals + fakes
-random.Random(1).shuffle(pool)
-n_val = min(t.get("val_size", 5000), max(2, len(pool) // 20))
-train_set = ImageDataset(pool[n_val:], t["size"], train=True)
-val_set = ImageDataset(pool[:n_val], t["size"])  # whole images, resized, as in testing
-print(f"train {len(train_set)} images ({len(reals)} reals incl. {n_drawn} renders, {len(number)} generators in "
-      f"{len(families)} families), val {len(val_set)}, calibration {len(calib)} reals; "
-      f"whole images resized to {t['size']} x {t['size']}, batch {t['batch_size']}")
-
-model = Detector(m["backbone"], families, m["train_blocks"])
-best = train(model, train_set, val_set, t, resume=args.resume)
-print(f"best checkpoint: {best}")
+for name in args.only.split(",") if args.only else experts:
+    if args.resume and trained(out, name, t["epochs"]):
+        print(f"{name}: trained, skipped")
+        continue
+    number = {g: j for j, g in enumerate(experts[name], 1)}  # label: 0 real, j = the j-th model of the expert
+    mine = [{**r, "label": number[r["generator"]]} for r in train_fakes if r["generator"] in number]
+    val = [{**r, "label": number[r["generator"]]} for r in val_fakes if r["generator"] in number][:n_val]
+    val += val_reals[: len(val)]
+    if name == "all":
+        model = Detector(m["backbone"], m["shared"], {"all": experts["all"]})  # pretrained DINOv3
+    else:
+        model = Detector.load(out, names=["all"])  # the trained trunk
+        model.add(name, experts[name])             # a copy of the general expert
+    print(f"expert {name}: {len(mine)} generated images of {len(number)} models and as many reals per epoch, val {len(val)}")
+    train(model, name, reals, mine, val, t, resume=args.resume)

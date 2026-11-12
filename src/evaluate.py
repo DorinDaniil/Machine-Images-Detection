@@ -1,8 +1,8 @@
 import math
+from collections import Counter
 
 import numpy as np
 import torch
-from sklearn.metrics import roc_auc_score
 from torch.utils.data import DataLoader
 
 from .model import Detector, score
@@ -10,33 +10,47 @@ from .model import Detector, score
 
 @torch.no_grad()
 def predict(model: Detector, dataset, device: str, batch_size: int = 32, workers: int = 4):
-    """Image scores and, for every image, the index of the head that gave the score."""
+    """N images through the K experts of the model. prob [N, K]: the probability that the image is generated,
+    by every expert. index [N, K]: the most likely model of every expert, as its place in expert.models."""
     model.eval().to(device)
-    scores, heads = [], []
+    probs, indices = [], []
     for image, _ in DataLoader(dataset, batch_size=batch_size, num_workers=workers):
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device == "cuda"):
-            s, head = score(model(image.to(device)))
-        scores.append(s.cpu())
-        heads.append(head.cpu())
-    return torch.cat(scores).double().numpy(), torch.cat(heads).numpy()
+            answers = [score(logits) for logits in model(image.to(device)).values()]
+        probs.append(torch.stack([p for p, _ in answers], dim=1).cpu())
+        indices.append(torch.stack([i for _, i in answers], dim=1).cpu())
+    return torch.cat(probs).double().numpy(), torch.cat(indices).numpy()
 
 
-def threshold_at(calib_real_scores: np.ndarray, alpha: float) -> float:
-    """Conformal threshold from real images only: a new real image exceeds it with probability <= alpha."""
-    s = np.sort(calib_real_scores)
-    k = math.ceil((len(s) + 1) * (1 - alpha)) - 1
-    return float(s[min(k, len(s) - 1)])
+def thresholds(real: np.ndarray, alpha: float) -> np.ndarray:
+    """One threshold per expert, from real images only: real [n, K] are the probabilities the K experts gave to n
+    calibration reals. Every expert gets the same share of the false alarms: its threshold is the same quantile
+    of its own probabilities on the reals, and the quantile is the lowest one at which at most alpha of the
+    reals pass any of the K thresholds."""
+    n = len(real)
+    place = real.argsort(axis=0).argsort(axis=0)  # [n, K]: the place of every real among the reals, by every expert
+    highest = np.sort(place.max(axis=1))          # the highest place of every real over the experts
+    return np.sort(real, axis=0)[highest[min(math.ceil((n + 1) * (1 - alpha)), n) - 1]]
 
 
-def report(threshold: float, reals: dict, fakes: list, families: list) -> str:
-    """reals: {name: scores} -> measured FPR at the threshold.
-    fakes: [(name, real scores of the same source, fake scores, heads)] -> AUROC, TPR and the head that
-    answers for the group most often."""
-    lines = ["| real set | n | FPR at threshold |", "|---|---|---|"]
-    lines += [f"| {name} | {len(s)} | {(s > threshold).mean():.3f} |" for name, s in reals.items()]
-    lines += ["", "| fake group | n | AUROC vs its reals | TPR at threshold | head |", "|---|---|---|---|---|"]
-    for name, real, fake, heads in fakes:
-        auroc = roc_auc_score(np.r_[np.zeros(len(real)), np.ones(len(fake))], np.r_[real, fake])
-        head = families[np.bincount(heads).argmax()]
-        lines.append(f"| {name} | {len(fake)} | {auroc:.3f} | {(fake > threshold).mean():.3f} | {head} |")
+def verdict(prob: np.ndarray, thr: np.ndarray):
+    """generated [N]: some expert is above its threshold. winner [N]: the expert furthest above its own."""
+    return (prob > thr).any(axis=1), (prob - thr).argmax(axis=1)
+
+
+def report(model: Detector, thr: np.ndarray, reals: dict, fakes: list) -> str:
+    """reals: {set: prob [n, K]} -> measured FPR. fakes: [(group, prob [n, K], index [n, K])] -> TPR, the expert
+    that answers for the group most often, the model it names most often and, for a generator seen in training,
+    how often the model is named exactly."""
+    names, seen = list(model.experts), set(model.experts["all"].models)
+    lines = ["| real set | n | FPR |", "|---|---|---|"]
+    lines += [f"| {name} | {len(prob)} | {verdict(prob, thr)[0].mean():.3f} |" for name, prob in reals.items()]
+    lines += ["", "| fake group | n | TPR | expert | named as | exact model |", "|---|---|---|---|---|---|"]
+    for group, prob, index in fakes:
+        hit, winner = verdict(prob, thr)
+        named = [model.experts[names[w]].models[index[i, w]] for i, w in enumerate(winner)]
+        expert, model_name = Counter(names[w] for w in winner).most_common(1)[0][0], Counter(named).most_common(1)[0][0]
+        exact = f"{np.mean([name == group for name in named]):.3f}" if group in seen else ""
+        lines.append(f"| {group}{' (in train)' if group in seen else ''} | {len(prob)} | {hit.mean():.3f} | {expert} | "
+                     f"{model_name} | {exact} |")
     return "\n".join(lines)

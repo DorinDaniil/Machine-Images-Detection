@@ -1,7 +1,8 @@
-# Real images against images of many open and API generators (OpenFake). DINOv3 with its last blocks trained and
-# one head per generator family: every head is a specialist "this family against real", the image score is the
-# most confident head. Whole images resized to 512 x 512, augmented.
-# Test on newer generators, other real sources, local edits and non-photo reals: whole images at 512 x 512.
+# Real images against images of many open and API generators (OpenFake). An ensemble on one small backbone:
+# a shared trunk (DINOv3 ConvNeXt-Tiny), a general expert over every generator and one expert per generator
+# family. Every expert is trained on its own, "its generators against the reals", and also names the exact model.
+# An image is called generated when any expert is above its own threshold. Whole images resized to 512 x 512.
+# Test on newer generators, other real sources, local edits and non-photo reals.
 # Data: 300k reals, up to 10k images of each of 36 generators; 3.3 TB downloaded, ~0.6 TB kept.
 
 data:
@@ -64,24 +65,28 @@ data:
                             #   ~10 min to draw once, ~1.2 GB): fewer false positives on screenshots, documents, logos
 
 model:
-  backbone: vit_large_patch16_dinov3.lvd1689m   # timm, no access request; lighter: vit_base_patch16_dinov3.lvd1689m
-  train_blocks: 8           # the last 8 of the 24 blocks are trained (all 12 for the base model), the first stay as
-                            #   pretrained. 0: frozen backbone, only the heads learn. Out of GPU memory: 4, or batch 16
-  families:                 # one head per family: generators of one maker or one architecture. A new version of a
-                            #   known family is caught by its head. One family with every generator = a plain
-                            #   real / generated classifier. Every generator of data.train.generators must be here
+  backbone: convnext_tiny.dinov3_lvd1689m   # timm, no access request; 28M parameters. Larger: convnext_small.dinov3_lvd1689m
+  shared: 4                 # the trunk = the stem and the first 3 of the 4 stages, computed once per image; every
+                            #   expert owns a copy of the last stage (15M parameters, ~25 ms on a CPU).
+                            #   3: the two last stages per expert; 0: every expert is a whole separate network
+  families:                 # one expert per family: the generators of one maker or one architecture against the
+                            #   reals. A new version of a known family is caught by its expert. Regroup freely:
+                            #   every generator of data.train.generators must be in exactly one family.
+                            #   run_train.py adds the general expert "all": every generator, trained first
     openai: [gpt-image-1, dalle-3]
     google: [imagen-3.0-002, imagen-4.0, nano-banana-2]
     midjourney: [midjourney-6]
     ideogram: [ideogram-3.0]
     xai: [grok-2-image-1212, grok-imagine]
-    seedream: [seedream-v4.0, seedream-v4.5]
+    seedream: [seedream-v4.0, seedream-v4.5]                  # ByteDance
+    qwen: [qwen-image]                                        # Alibaba
     flux: [flux-1.1-pro, flux.1-dev, flux.1-schnell, flux.2-dev, flux.2-klein-4b, chroma, mystic,
            flux-amateursnapshotphotos, amateur-photography-v6]
     sd: [sd-1.5, sd-2.1, sd-1.5-dreamshaper, realistic_vision_v5.1_novae]
     sdxl: [sdxl, sdxl-juggernaut, sdxl-realvis-v5, sdxl-epic-realism, playground-v2.5-1024px-aesthetic]
-    dit: [sd-3.5, hidream-i1-full, qwen-image]        # other open diffusion transformers
-    video: [wan-video-2.2, wan-video-2.1, hunyuan-video, ltxv-2.3]
+    dit: [sd-3.5, hidream-i1-full]                            # other open diffusion transformers
+    video_cn: [wan-video-2.2, wan-video-2.1, hunyuan-video]   # frames of the Chinese video models
+    ltx: [ltxv-2.3]                                           # frames of LTX Video
 
 train:
   size: 512                 # every image, whole, resized to 512 x 512 (aspect not kept), in training and testing;
@@ -89,19 +94,19 @@ train:
                             #   one JPEG pass first if the file is not a JPEG; a random part of 50-100 % of the image,
                             #   aspect 1:2-2:1; resampling 20 %, blur 10 %, noise 20 %; JPEG q60-95 or WebP (20 %),
                             #   a second JPEG 25 %; the resize; flip
-  samples_per_epoch: 50000  # balanced draws, then validation, metrics.csv, state.pt and best.pt
-  epochs: 20                # 1M draws: ~1.7 passes over the ~585k train images
-  balance_floor: 10000      # half of every batch is real, the other half is shared by the families equally;
-                            #   a family with fewer images than this weighs in proportion to its size
-  batch_size: 32
-  val_size: 5000            # images held out for validation; best.pt = epoch with the lowest validation loss
-  lr: 2.0e-5                # the trained blocks of the backbone
-  head_lr: 1.0e-3           # the heads
+  epochs: 3                 # per expert. An epoch: every generated image of the expert once and as many reals,
+                            #   drawn anew every epoch; then validation, metrics/<name>.csv and state.pt.
+                            #   In all every generated image is seen 6 times: 3 by "all", 3 by its family expert
+  batch_size: 32            # ~10 GB of GPU memory for "all" (the trunk is trained), far less for a family expert
+  val_size: 5000            # per expert: up to this many held-out images, half of them real; the expert is saved
+                            #   at the epoch with the lowest validation loss
+  lr: 5.0e-5                # the trunk and the last stage
+  head_lr: 1.0e-3           # the linear layer
   weight_decay: 0.05
   num_workers: 8
   device: cuda
-  out: runs/families
+  out: runs/experts         # trunk.pt, experts/<name>.pt, metrics/<name>.csv, calibration.json, thresholds.json, report.md
 
 test:
-  alpha: 0.01               # target false-positive rate; threshold from calibration reals only
+  alpha: 0.01               # target false-positive rate of the whole ensemble; thresholds from calibration reals only
   max_calib: 10000          # calibration reals used (of the 15 % held out): enough for a 1 % threshold
