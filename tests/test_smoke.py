@@ -279,9 +279,6 @@ def test_sid_names_unique(tmp_path, monkeypatch):
         kind = {"": 0, "sid-full": 1, "sid-edit": 2}[r["generator"]]
         assert Image.open(r["path"]).convert("RGB").getpixel((5, 5)) == colors[kind]
         assert bool(r["mask"]) == (kind == 2)
-    old = [dict(r, path=str(tmp_path / "sid" / "000004.png")) for r in rows]  # names of the old code
-    save_rows(old, tmp_path / "sid.csv")
-    assert download.sid_set("validation", tmp_path / "sid", n_per_class=2) == rows  # rebuilt, not reused
 
 
 def test_scripts_end_to_end(tmp_path):
@@ -391,7 +388,7 @@ def test_scripts_end_to_end(tmp_path):
 
     ns = notebook("predict.ipynb")
     assert ns["thresholds"] == thr and set(ns["result"]) == set(thr)
-    assert all(0 <= prob <= 1 and name in ("gen-a", "gen-b") for prob, name in ns["result"].values())
+    assert all(0 <= prob <= 1 and name in ("gen-a", "gen-b", "gen-new") for prob, name in ns["result"].values())
     for p in sorted((tmp_path / "my_images").iterdir()):  # the notebook prepares an image exactly as run_test.py
         assert torch.equal(ns["prepare"](p), ImageDataset([{"path": str(p), "label": 0}], cfg["train"]["size"])[0][0])
 
@@ -477,6 +474,15 @@ def test_openfake_resume(tmp_path, monkeypatch):
         split, file, row = Path(name).stem.split("_")
         assert split == "test" and r["prompt"] == f"prompt {int(row) + 15 * int(file)}"
     assert load_rows(tmp_path / "of" / "openfake_test.csv") == rows
+    assert sorted(p.name for p in (tmp_path / "of").iterdir()) == ["fake", "openfake_test.csv", "real"]  # no work folder left
+
+    old = tmp_path / "of" / "openfake_test"  # as left by a download with older code: records, and maybe images
+    (old / "done").mkdir(parents=True)
+    assert download.openfake("test", tmp_path / "of", n_real=2, n_per_model=2) == rows and not old.exists()
+    (old / "tmp").mkdir(parents=True)
+    Image.new("RGB", (8, 8)).save(old / "0000_00001.png")
+    download.openfake("test", tmp_path / "of", n_real=2, n_per_model=2)
+    assert [p.name for p in old.iterdir()] == ["0000_00001.png"]  # an image is never deleted, only the work files
 
 
 def test_openfake_caps(tmp_path, monkeypatch):

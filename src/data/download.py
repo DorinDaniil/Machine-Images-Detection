@@ -11,8 +11,10 @@ SID_Set (saberzl/SID_Set, CC BY 4.0): real (0), fully synthetic (1) and locally 
 OpenFake images go straight to the folders training reads (src/data/pool.py):
     <data>/real/<source>/<split>_<file>_<row>.jpg         laion, docci, ...
     <data>/fake/<generator>/<split>_<file>_<row>.png      gpt-image-1, flux.1-dev, ...
-The list of them with the prompts is <data>/openfake_<split>.csv; <data>/openfake_<split>/done/ holds the
-records of the finished parquet files. SID_Set is a test set and stays in its own folder.
+The list of them with the prompts is <data>/openfake_<split>.csv: once it is there, the split counts as
+downloaded. While a split is downloading, <data>/openfake_<split>/ holds the records of the finished parquet
+files and the temporary files; they are removed when the list is written. SID_Set is a test set and stays in
+its own folder.
 
 Images are stored as their original bytes: no re-encoding, no resizing, nothing is lost. Fakes are mostly
 PNG and reals mostly JPEG, so the file format does correlate with the label; dataset.py removes that by
@@ -24,7 +26,6 @@ import csv
 import io
 import json
 import os
-import re
 import shutil
 import time
 from collections import Counter
@@ -123,6 +124,15 @@ def _take_file(rows_iter, i: int, split: str, data: Path, quota: dict, counts: C
     return {"read": read, "rows": rows}
 
 
+def _tidy(out_dir: Path) -> None:
+    """Removes the records of finished files and the temporary files of a download. The folder itself goes only
+    if nothing else is in it: images stored there by the first versions of the code are never deleted."""
+    shutil.rmtree(out_dir / "done", ignore_errors=True)
+    shutil.rmtree(out_dir / "tmp", ignore_errors=True)
+    if out_dir.is_dir() and not any(out_dir.iterdir()):
+        out_dir.rmdir()
+
+
 def openfake(split: str, data, n_real=None, n_per_model=None, real_sources=None, generators=None,
              max_files=None, workers: int = 8, min_side: int = 512) -> list[dict]:
     """Up to n_real reals (optionally only from real_sources) and up to n_per_model images of every generator
@@ -132,11 +142,13 @@ def openfake(split: str, data, n_real=None, n_per_model=None, real_sources=None,
     Images go to <data>/real/<source>/ and <data>/fake/<generator>/. `workers` files are downloaded at once
     (~5.4 GB of temporary disk each). Every finished file is recorded in <data>/openfake_<split>/done/, so a
     rerun after a crash or Ctrl+C skips it; a file that breaks is retried. Every row keeps the OpenFake prompt,
-    prompt_kind and row_id. Result cached in <data>/openfake_<split>.csv."""
+    prompt_kind and row_id. Result cached in <data>/openfake_<split>.csv; the records and the temporary
+    files are removed then."""
     data = Path(data)
     out_dir = data / f"openfake_{split}"
     cache, done_dir, tmp_dir = out_dir.with_suffix(".csv"), out_dir / "done", out_dir / "tmp"
     if cache.exists():
+        _tidy(out_dir)  # left by a download finished with older code
         return load_rows(cache)
     done_dir.mkdir(parents=True, exist_ok=True)
 
@@ -185,6 +197,7 @@ def openfake(split: str, data, n_real=None, n_per_model=None, real_sources=None,
 
     rows = [r for p in sorted(done_dir.glob("*.json")) for r in json.loads(p.read_text())["rows"]]
     save_rows(rows, cache)
+    _tidy(out_dir)  # records and temporary files: not needed once the list is written
     gens = Counter(r["generator"] for r in rows if r["label"])
     print(f"OpenFake {split}: {len(rows) - sum(gens.values())} reals, {sum(gens.values())} fakes from {len(gens)} generators")
     for g, n in gens.most_common():
@@ -198,12 +211,8 @@ def sid_set(split: str, out_dir, n_per_class: int, min_side: int = 512) -> list[
     out_dir = Path(out_dir)
     cache = out_dir.with_suffix(".csv")
     if cache.exists():
-        rows = load_rows(cache)
-        if not any(re.fullmatch(r"\d{6}", Path(r["path"]).stem) for r in rows):  # the old code named files 000123
-            return rows
-        print(f"{cache}: written with the old file names, which could overwrite images; downloading again")
-        shutil.rmtree(out_dir, ignore_errors=True)
-        cache.unlink()
+        shutil.rmtree(out_dir / "tmp", ignore_errors=True)
+        return load_rows(cache)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     names = {0: "real", 1: "full", 2: "edit"}
@@ -230,5 +239,6 @@ def sid_set(split: str, out_dir, n_per_class: int, min_side: int = 512) -> list[
         if min(counts[k] for k in names.values()) >= n_per_class:
             break
     save_rows(rows, cache)
+    shutil.rmtree(out_dir / "tmp", ignore_errors=True)
     print(f"SID_Set {split}: {dict(counts)}")
     return rows
