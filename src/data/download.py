@@ -8,6 +8,12 @@ OpenFake (ComplexDataLab/OpenFake, v2, CC BY-NC 4.0): real photos and images of 
 SID_Set (saberzl/SID_Set, CC BY 4.0): real (0), fully synthetic (1) and locally edited (2) images with masks
     of the edited region; validation: 30k rows, 17 GB, 34 files.
 
+OpenFake images go straight to the folders training reads (src/data/pool.py):
+    <data>/real/<source>/<split>_<file>_<row>.jpg         laion, docci, ...
+    <data>/fake/<generator>/<split>_<file>_<row>.png      gpt-image-1, flux.1-dev, ...
+The list of them with the prompts is <data>/openfake_<split>.csv; <data>/openfake_<split>/done/ holds the
+records of the finished parquet files. SID_Set is a test set and stays in its own folder.
+
 Images are stored as their original bytes: no re-encoding, no resizing, nothing is lost. Fakes are mostly
 PNG and reals mostly JPEG, so the file format does correlate with the label; dataset.py removes that by
 JPEG-compressing every image not stored as JPEG once before anything else. Images whose short side is below
@@ -86,9 +92,10 @@ def _rows(repo: str, name: str, tmp_dir: Path, columns: list[str]):
         path.unlink(missing_ok=True)
 
 
-def _take_file(rows_iter, i: int, out_dir: Path, quota: dict, counts: Counter, taken: Counter, lock,
+def _take_file(rows_iter, i: int, split: str, data: Path, quota: dict, counts: Counter, taken: Counter, lock,
                real_sources, generators, min_side: int) -> dict:
-    """Keeps images of file i while their shared quota is not full; `taken` records what this attempt reserved."""
+    """Keeps images of file i while their shared quota is not full, in <data>/real/<source>/ or
+    <data>/fake/<generator>/; `taken` records what this attempt reserved."""
     rows, read = [], 0
     for j, row in enumerate(rows_iter):
         read += 1
@@ -102,7 +109,9 @@ def _take_file(rows_iter, i: int, out_dir: Path, quota: dict, counts: Counter, t
                 continue
             counts[key] += 1
             taken[key] += 1
-        stored = _store(row["image"]["bytes"], out_dir / f"{i:04d}_{j:05d}", min_side)
+        folder = data / ("fake" if label else "real") / model
+        folder.mkdir(parents=True, exist_ok=True)
+        stored = _store(row["image"]["bytes"], folder / f"{split}_{i:04d}_{j:05d}", min_side)
         if stored:
             rows.append({"path": str(stored[0]), "label": label, "generator": model if label else "",
                          "mask": "", "source": "openfake" if label else f"openfake/{model}",
@@ -114,16 +123,18 @@ def _take_file(rows_iter, i: int, out_dir: Path, quota: dict, counts: Counter, t
     return {"read": read, "rows": rows}
 
 
-def openfake(split: str, out_dir, n_real=None, n_per_model=None, real_sources=None, generators=None,
+def openfake(split: str, data, n_real=None, n_per_model=None, real_sources=None, generators=None,
              max_files=None, workers: int = 8, min_side: int = 512) -> list[dict]:
     """Up to n_real reals (optionally only from real_sources) and up to n_per_model images of every generator
     (optionally only those in `generators`; None: no limit) from the first max_files files of OpenFake
     core/<split> (None: all). With a generator list the download stops as soon as every quota is full.
 
-    `workers` files are downloaded at once (~5.4 GB of temporary disk each). Every finished file is recorded
-    in <out_dir>/done/, so a rerun after a crash or Ctrl+C skips it; a file that breaks is retried.
-    Every row keeps the OpenFake prompt, prompt_kind and row_id. Result cached in <out_dir>.csv."""
-    out_dir = Path(out_dir)
+    Images go to <data>/real/<source>/ and <data>/fake/<generator>/. `workers` files are downloaded at once
+    (~5.4 GB of temporary disk each). Every finished file is recorded in <data>/openfake_<split>/done/, so a
+    rerun after a crash or Ctrl+C skips it; a file that breaks is retried. Every row keeps the OpenFake prompt,
+    prompt_kind and row_id. Result cached in <data>/openfake_<split>.csv."""
+    data = Path(data)
+    out_dir = data / f"openfake_{split}"
     cache, done_dir, tmp_dir = out_dir.with_suffix(".csv"), out_dir / "done", out_dir / "tmp"
     if cache.exists():
         return load_rows(cache)
@@ -150,8 +161,8 @@ def openfake(split: str, out_dir, n_real=None, n_per_model=None, real_sources=No
             for attempt in range(1, ATTEMPTS + 1):
                 taken = Counter()
                 try:
-                    part = _take_file(_rows(OPENFAKE, files[i], tmp_dir, ["image", "label", "model", *META]), i, out_dir,
-                                      quota, counts, taken, lock, real_sources, generators, min_side)
+                    part = _take_file(_rows(OPENFAKE, files[i], tmp_dir, ["image", "label", "model", *META]), i, split,
+                                      data, quota, counts, taken, lock, real_sources, generators, min_side)
                     break
                 except Exception as e:  # network or file error: give the quota back, wait, try again
                     with lock:

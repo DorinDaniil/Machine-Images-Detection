@@ -14,7 +14,7 @@ import torch
 import torch.nn.functional as F
 from PIL import Image
 
-from src.data import ImageDataset, load_pool, load_rows, render_folder, save_rows, sort_folders
+from src.data import ImageDataset, load_pool, load_rows, render_folder, save_rows
 from src.data.download import _store
 from src.evaluate import predict, report, thresholds, verdict
 from src.model import Detector, score
@@ -181,11 +181,20 @@ def test_views(tmp_path):
 
     photo = Image.fromarray(np.random.default_rng(1).integers(0, 255, (90, 120, 3), dtype=np.uint8))
     changed = []
-    for seed in range(60):  # colour, sharpening, a patch, resampling, blur, noise, compression: the size is kept
+    for seed in range(60):  # colour, sharpening, censoring, resampling, blur, noise, compression: the size is kept
         out = degrade(photo.copy(), np.random.default_rng(seed))
         assert out.size == photo.size and out.mode == "RGB"
         changed.append(np.abs(np.asarray(out, np.float32) - np.asarray(photo, np.float32)).mean())
     assert min(changed) > 0 and max(changed) > 3 * min(changed)  # always compressed, some views much more changed
+
+    from src.data.dataset import censor
+
+    pixels, share = np.asarray(photo).copy(), []
+    for seed in range(100):  # blur, big pixels, a box or a bar over one region; the rest and the input stay as they were
+        out = censor(photo, np.random.default_rng(seed))
+        assert out.size == photo.size and np.array_equal(np.asarray(photo), pixels)
+        share.append((np.asarray(out) != pixels).any(axis=2).mean())
+    assert 0 < min(share) and max(share) < 0.3 and 0.03 < np.median(share) < 0.15
 
     (tmp_path / "broken.jpg").write_bytes(b"not an image")  # reported and replaced by the next image
     ds = ImageDataset([{"path": str(tmp_path / "broken.jpg"), "label": 1}, item], 64)
@@ -194,33 +203,16 @@ def test_views(tmp_path):
 
 
 def test_folders_and_split(tmp_path):
-    """OpenFake files are sorted into data/real/<source>/ and data/fake/<generator>/; real folders of the user are
-    read through their subfolders; the part of an image depends only on "<folder>/<file>"."""
+    """data/real/<source>/ and data/fake/<generator>/ and the real folders of the user are read through their
+    subfolders; the part of an image depends only on "<folder>/<file>"."""
     from src.data.pool import part
 
     data, blank = tmp_path / "data", Image.new("RGB", (40, 40))
-    specs = {"train": [(0, "", "openfake/laion")] * 30 + [(1, "gen-a", "openfake")] * 30,
-             "test": [(0, "", "openfake/docci")] * 10 + [(1, "gen-a", "openfake")] * 10}
-    for split, spec in specs.items():
-        folder = data / f"openfake_{split}"
-        folder.mkdir(parents=True)
-        rows = []
-        for i, (label, generator, source) in enumerate(spec):
-            blank.save(folder / f"{i:04d}.png")
-            rows.append({"path": str(folder / f"{i:04d}.png"), "label": label, "generator": generator, "mask": "",
-                         "source": source, "prompt": f"prompt {i}"})
-        save_rows(rows, data / f"openfake_{split}.csv")
-    sort_folders(data)
-    count = lambda folder: len(list(folder.iterdir()))  # noqa: E731
-    assert count(data / "fake" / "gen-a") == 40  # train and test files of the same name are both kept
-    assert count(data / "real" / "laion") == 30 and count(data / "real" / "docci") == 10
-    assert not list((data / "openfake_train").glob("*.png")) and not list((data / "openfake_test").glob("*.png"))
-    rows = load_rows(data / "openfake_test.csv")
-    assert all(Path(r["path"]).exists() for r in rows) and rows[13]["prompt"] == "prompt 13"  # new paths, prompts kept
-    before = sorted(p.name for p in (data / "fake" / "gen-a").iterdir())
-    sort_folders(data)  # again: nothing moves, nothing is renamed twice
-    assert sorted(p.name for p in (data / "fake" / "gen-a").iterdir()) == before
-    assert load_rows(data / "openfake_test.csv") == rows
+    for folder, n in (("real/laion", 30), ("real/docci", 10), ("fake/gen-a", 40)):
+        (data / folder).mkdir(parents=True)
+        for i in range(n):
+            blank.save(data / folder / f"train_{i:04d}.png")
+    blank.save(data / "fake" / "stray.png")  # not in a generator folder: ignored
 
     mine = tmp_path / "my_reals"
     (mine / "logos").mkdir(parents=True)
@@ -247,6 +239,53 @@ def test_folders_and_split(tmp_path):
     again = {r["path"]: name for name, part_rows in load_pool(d).items() for r in part_rows}
     assert len(again) == 125 and all(again[p] == name for p, name in where.items())
     assert part("/disk1/data/real/laion/7.jpg", 0.2, 0.2) == part("/another/place/laion/7.jpg", 0.2, 0.2)  # data moved
+
+
+def test_migrate_old_layout(tmp_path):
+    """scripts/migrate_data.py (one-off, to be deleted with this test): the flat folders of the old downloader
+    become what the new downloader writes, in the csv lists and in the records of finished files alike."""
+    import subprocess
+    import sys
+
+    import yaml
+
+    data, blank = tmp_path / "data", Image.new("RGB", (40, 40))
+    specs = {"train": [(0, "", "openfake/laion")] * 6 + [(1, "gen-a", "openfake")] * 6,
+             "test": [(0, "", "openfake/docci")] * 4 + [(1, "gen-a", "openfake")] * 4}
+    for split, spec in specs.items():
+        folder = data / f"openfake_{split}"
+        (folder / "done").mkdir(parents=True)
+        rows = []
+        for i, (label, generator, source) in enumerate(spec):
+            blank.save(folder / f"0000_{i:05d}.png")
+            rows.append({"path": str(folder / f"0000_{i:05d}.png"), "label": label, "generator": generator, "mask": "",
+                         "source": source, "prompt": f"prompt {i}", "prompt_kind": "", "row_id": f"row-{i}"})
+        (folder / "done" / "0000.json").write_text(json.dumps({"read": len(rows), "rows": rows}))
+        if split == "train":  # the test split was still downloading: records only, no list yet
+            save_rows(rows, data / "openfake_train.csv")
+    (tmp_path / "tiny.yaml").write_text(yaml.safe_dump({"data": {"dir": "data"}}))
+
+    def migrate():
+        done = subprocess.run([sys.executable, str(Path(__file__).resolve().parents[1] / "scripts" / "migrate_data.py"),
+                               "--config", "tiny.yaml"], cwd=tmp_path, capture_output=True, text=True, timeout=120)
+        assert done.returncode == 0, done.stdout[-2000:] + done.stderr[-2000:]
+        return done.stdout
+
+    log = migrate()
+    assert "20 images moved" in log and "0 of them not found, 0 files left" in log
+    names = lambda folder: sorted(p.name for p in (data / folder).iterdir())  # noqa: E731
+    assert names("fake/gen-a") == [f"test_0000_{i:05d}.png" for i in range(4, 8)] + [f"train_0000_{i:05d}.png" for i in range(6, 12)]
+    assert names("real/laion") == [f"train_0000_{i:05d}.png" for i in range(6)] and len(names("real/docci")) == 4
+    rows = load_rows(data / "openfake_train.csv")
+    record = json.loads((data / "openfake_train" / "done" / "0000.json").read_text())
+    assert [r["path"] for r in rows] == [r["path"] for r in record["rows"]] and record["read"] == 12
+    assert all((tmp_path / r["path"]).exists() for r in rows) and rows[7]["prompt"] == "prompt 7" and rows[7]["row_id"] == "row-7"
+    assert Path(rows[7]["path"]).parts[-3:] == ("fake", "gen-a", "train_0000_00007.png")
+    record = json.loads((data / "openfake_test" / "done" / "0000.json").read_text())
+    assert all((tmp_path / r["path"]).exists() for r in record["rows"]) and not (data / "openfake_test.csv").exists()
+
+    assert "0 images moved" in migrate()  # again: nothing moves, nothing is renamed twice
+    assert load_rows(data / "openfake_train.csv") == rows and len(names("fake/gen-a")) == 10
 
 
 def test_compression_history(tmp_path):
@@ -301,21 +340,22 @@ def test_scripts_end_to_end(tmp_path):
     data = tmp_path / "data"
     rng = np.random.default_rng(0)
 
-    def table(name, spec):  # spec: (label, generator, source, masked) per image; data/<name>.csv as the loaders cache it
-        folder = data / name
-        folder.mkdir(parents=True)
+    def table(name, spec):  # spec: (label, generator, source, masked) per image; folders and data/<name>.csv as downloaded
         rows = []
         for i, (label, generator, source, masked) in enumerate(spec):
+            folder = data / name if source.startswith("sid") else data / ("fake" if label else "real") / (generator or source.split("/")[-1])
+            folder.mkdir(parents=True, exist_ok=True)
+            file = folder / f"{name}_{i}.png"
             w, h = 288 + 16 * (i % 3), 256 + 16 * (i % 2)
             cells = 6 if label else 24
-            Image.fromarray(rng.integers(0, 255, (cells, cells, 3), dtype=np.uint8)).resize((w, h), Image.BICUBIC).save(folder / f"{i}.png")
+            Image.fromarray(rng.integers(0, 255, (cells, cells, 3), dtype=np.uint8)).resize((w, h), Image.BICUBIC).save(file)
             mask = ""
             if masked:
                 m = np.zeros((h, w), np.uint8)
                 m[60:160, 80:200] = 255
-                mask = str(folder / f"{i}_mask.png")
+                mask = str(folder / f"{name}_{i}_mask.png")
                 Image.fromarray(m).save(mask)
-            rows.append({"path": str(folder / f"{i}.png"), "label": label, "generator": generator, "mask": mask, "source": source})
+            rows.append({"path": str(file), "label": label, "generator": generator, "mask": mask, "source": source})
         save_rows(rows, data / f"{name}.csv")
 
     sid = [(0, "", "sid/real", False)] * 3 + [(1, "sid-full", "sid/full", False)] * 3 + [(1, "sid-edit", "sid/edit", True)] * 3
@@ -343,7 +383,7 @@ def test_scripts_end_to_end(tmp_path):
         assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-3000:]
         return done.stdout
 
-    run("download_data.py")  # everything is cached: nothing is downloaded, the images are sorted into folders
+    run("download_data.py")  # everything is cached: nothing is downloaded
     assert len(list((data / "fake" / "gen-a").iterdir())) == 20 and len(list((data / "real" / "docci").iterdir())) == 8
     train_log = run("run_train.py")
     sizes = {name: (int(n_real), int(n_fake)) for name, n_real, n_fake in
@@ -466,15 +506,20 @@ def test_openfake_resume(tmp_path, monkeypatch):
     hub.fail = {"f2": 99}
     with pytest.raises(ConnectionError):
         download.openfake("test", tmp_path / "of", n_real=2, n_per_model=2, workers=3)
-    assert sorted(p.name for p in (tmp_path / "of" / "done").glob("*.json")) == ["0000.json", "0001.json"]
-    assert not (tmp_path / "of.csv").exists()
+    assert sorted(p.name for p in (tmp_path / "of" / "openfake_test" / "done").glob("*.json")) == ["0000.json", "0001.json"]
+    assert not (tmp_path / "of" / "openfake_test.csv").exists()
 
     hub.fail, hub.opened = {"f2": 1}, []
     rows = download.openfake("test", tmp_path / "of", n_real=2, n_per_model=2, workers=3)
     assert hub.opened == ["f2", "f2"]
     assert sum(r["label"] == 0 for r in rows) == 2
     assert sorted(r["generator"] for r in rows if r["label"]) == ["gen-a", "gen-a", "gen-b", "gen-b"]
-    assert all(r["prompt"] == f"prompt {int(Path(r['path']).stem.split('_')[1]) + 15 * int(Path(r['path']).stem[:4])}" for r in rows)
+    for r in rows:  # real/<source>/test_<file>_<row>.png or fake/<generator>/...; the prompt of that very row
+        kind, folder, name = Path(r["path"]).parts[-3:]
+        assert (kind, folder) == (("fake", r["generator"]) if r["label"] else ("real", r["source"].split("/")[1])) and Path(r["path"]).exists()
+        split, file, row = Path(name).stem.split("_")
+        assert split == "test" and r["prompt"] == f"prompt {int(row) + 15 * int(file)}"
+    assert load_rows(tmp_path / "of" / "openfake_test.csv") == rows
 
 
 def test_openfake_caps(tmp_path, monkeypatch):
@@ -487,7 +532,7 @@ def test_openfake_caps(tmp_path, monkeypatch):
         reals = [r for r in rows if r["label"] == 0]
         assert len(reals) == 2 and all(r["source"] == "openfake/docci" for r in reals)
         assert sorted(r["generator"] for r in rows if r["label"]) == ["gen-a", "gen-a", "gen-b", "gen-b"]
-    assert download.openfake("test", tmp_path / "three", 2, 2) == load_rows(tmp_path / "three.csv")  # cached
+    assert download.openfake("test", tmp_path / "three", 2, 2) == load_rows(tmp_path / "three" / "openfake_test.csv")  # cached
     assert not [r for r in download.openfake("test", tmp_path / "first", 9, 9, max_files=1) if r["label"]]  # file 0: reals only
     assert len(download.openfake("test", tmp_path / "all", real_sources=["docci"])) == 27  # no limits: 9 docci, 9 gen-a, 9 gen-b
 

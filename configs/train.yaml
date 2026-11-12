@@ -103,7 +103,8 @@ train:
   size: 512                 # every image, whole, resized to 512 x 512 (aspect not kept), in training and testing;
                             #   ImageNet mean / std are applied inside the model. Training views (src/data/dataset.py):
                             #   one JPEG pass first if the file is not a JPEG; a random part of 50-100 % of the image,
-                            #   aspect 1:2-2:1; colour 25 %, grey 3 %, sharpening 10 %, a flat patch 10 %,
+                            #   aspect 1:2-2:1; colour 25 %, grey 3 %, sharpening 10 %, a censored region 10 %
+                            #   (blur, big pixels, a box or a bar over 1-20 % of the image),
                             #   resampling 25 %, blur 15 %, noise 20 %; JPEG q50-95 or WebP (20 %), a second JPEG 25 %;
                             #   the resize; flip, a turn by 90 degrees 5 %. A third of the views get only the
                             #   crop and the compression

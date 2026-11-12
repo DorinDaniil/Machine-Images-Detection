@@ -36,9 +36,47 @@ def compress(image: Image.Image, fmt: str = "JPEG", quality: int = 90, subsampli
         return im.convert("RGB")
 
 
+def censor(image: Image.Image, rng: np.random.Generator) -> Image.Image:
+    """Something hidden before posting, as over a face, a plate or a name: a strong blur, big pixels or a flat
+    box over a region of 2-20 % of the image, or a thin bar of 1-6 % as over the eyes. The region is a rectangle,
+    an ellipse or a smooth blob. After the fragment edits of Evidential-Copy-Detection (overlays.py)."""
+    kind = rng.choice(["blur", "pixels", "box", "bar"])
+    area, aspect = (rng.uniform(0.01, 0.06), rng.uniform(3, 7)) if kind == "bar" else (rng.uniform(0.02, 0.2), rng.uniform(0.6, 1.7))
+    w = int(min(0.9 * image.width, max(8, (image.width * image.height * area * aspect) ** 0.5)))
+    h = int(min(0.9 * image.height, max(8, image.width * image.height * area / w)))
+    x, y = int(rng.integers(0, image.width - w + 1)), int(rng.integers(0, image.height - h + 1))
+    region = image.crop((x, y, x + w, y + h))
+    if kind == "blur":
+        region = region.filter(ImageFilter.GaussianBlur(max(3.0, min(w, h) * rng.uniform(0.15, 0.35))))
+    elif kind == "pixels":
+        block = max(3, int(min(w, h) * rng.uniform(0.1, 0.25)))
+        region = region.resize((max(1, w // block), max(1, h // block)), Image.BILINEAR).resize((w, h), Image.NEAREST)
+    else:  # mostly black, sometimes white or any colour
+        r = rng.random()
+        colour = (0, 0, 0) if r < 0.7 else (255, 255, 255) if r < 0.85 else tuple(int(v) for v in rng.integers(0, 256, 3))
+        region = Image.new("RGB", (w, h), colour)
+
+    shape = "rectangle" if kind == "bar" else rng.choice(["rectangle", "ellipse", "blob"])
+    mask = Image.new("L", (w, h), 255 if shape == "rectangle" else 0)
+    if shape == "ellipse":
+        ImageDraw.Draw(mask).ellipse((0, 0, w - 1, h - 1), fill=255)
+    elif shape == "blob":  # an ellipse whose radius wobbles: a few random sine waves around it
+        angle = np.linspace(0, 2 * np.pi, 72, endpoint=False)
+        radius = 1 + sum(rng.uniform(0.06, 0.28) * np.sin(rng.integers(2, 8) * angle + rng.uniform(0, 2 * np.pi))
+                         for _ in range(rng.integers(2, 6)))
+        radius = np.clip(radius, 0.45, 1.0)
+        outline = zip(w / 2 * (1 + radius * np.cos(angle)), h / 2 * (1 + radius * np.sin(angle)))
+        ImageDraw.Draw(mask).polygon([(float(px), float(py)) for px, py in outline], fill=255)
+    if kind == "blur":  # a blur fades out at its edge
+        mask = mask.filter(ImageFilter.GaussianBlur(min(w, h) * rng.uniform(0.02, 0.08)))
+    image = image.copy()
+    image.paste(region, (x, y), mask)
+    return image
+
+
 def degrade(image: Image.Image, rng: np.random.Generator) -> Image.Image:
     """What images get on the way through the internet, size kept. Same probabilities for real and fake.
-    First what an author does (colour, sharpening, something pasted on top), then what sharing does
+    First what an author does (colour, sharpening, something censored), then what sharing does
     (resampling, blur, noise, compression). About a third of the views get nothing but the compression."""
     if rng.random() < 0.25:  # filters and auto-correction: brightness, contrast, saturation
         for enhance in (ImageEnhance.Brightness, ImageEnhance.Contrast, ImageEnhance.Color):
@@ -47,10 +85,8 @@ def degrade(image: Image.Image, rng: np.random.Generator) -> Image.Image:
         image = ImageOps.grayscale(image).convert("RGB")
     if rng.random() < 0.1:  # sharpening, as phone cameras and many resizers do
         image = image.filter(ImageFilter.UnsharpMask(rng.uniform(1, 2), int(rng.integers(50, 150)), 2))
-    if rng.random() < 0.1:  # a flat patch of 1-16 % of the image: sticker, caption bar, censored face
-        w, h = (int(side * rng.uniform(0.1, 0.4)) for side in image.size)
-        x, y = int(rng.integers(0, image.width - w + 1)), int(rng.integers(0, image.height - h + 1))
-        ImageDraw.Draw(image).rectangle((x, y, x + w, y + h), fill=tuple(int(v) for v in rng.integers(0, 256, 3)))
+    if rng.random() < 0.1:
+        image = censor(image, rng)
     if rng.random() < 0.25:  # resampled and brought back to the same size
         s = rng.uniform(0.5, 0.9) if rng.random() < 0.7 else rng.uniform(1.2, 2.0)
         size = image.size
@@ -103,8 +139,8 @@ class ImageDataset(Dataset):
     train=True, in this order:
       read      one JPEG pass first if the file is not a JPEG (see the module docstring);
       crop      a random part of the image (random_crop);
-      degrade   at the image's own resolution (above MAX_SIDE shrunk to it first): colour, sharpening, a flat
-                patch, resampling, blur, noise, then JPEG / WebP compression, always;
+      degrade   at the image's own resolution (above MAX_SIDE shrunk to it first): colour, sharpening, a censored
+                region, resampling, blur, noise, then JPEG / WebP compression, always;
       resize    to size x size, aspect not kept, with a random resampling filter;
       flip      horizontal, half of the views; a turn by 90, 180 or 270 degrees, 5 % of the views.
     A file that cannot be read is reported and the next image is returned instead of it.
