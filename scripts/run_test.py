@@ -42,11 +42,14 @@ def run(rows):
 
 parts = load_pool(d)
 calib = [r for r in parts["val"] if r["label"] == 0]
-calib = run(random.Random(0).sample(calib, min(len(calib), test.get("max_calib", 10000))))[0]
+calib = random.Random(0).sample(calib, min(len(calib), test.get("max_calib", 10000)))
+print(f"experts: {', '.join(names)}\nthresholds: {len(calib)} validation reals")
+calib = run(calib)[0]
 thr = thresholds(calib, test["alpha"])
 json.dump(dict(zip(names, thr.round(6).tolist())), open(out / "thresholds.json", "w"), indent=1)
 
 rows = parts["test"] + sid_set("validation", Path(d["dir"]) / "sid_validation", **d["sid"])
+print(f"test: {len(rows)} images")
 prob, index = run(rows)
 group = np.array([r["generator"] or r["source"] for r in rows])  # a generator, or where a real comes from
 real, sid = np.array([r["label"] == 0 for r in rows]), np.array([r["source"].startswith("sid/") for r in rows])

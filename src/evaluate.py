@@ -14,11 +14,13 @@ def predict(model: Detector, dataset, device: str, batch_size: int = 32, workers
     by every expert. index [N, K]: the most likely model of every expert, as its place in expert.models."""
     model.eval().to(device)
     probs, indices = [], []
-    for image, _ in DataLoader(dataset, batch_size=batch_size, num_workers=workers):
+    for step, (image, _) in enumerate(DataLoader(dataset, batch_size=batch_size, num_workers=workers), 1):
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device == "cuda"):
             answers = [score(logits) for logits in model(image.to(device)).values()]
         probs.append(torch.stack([p for p, _ in answers], dim=1).cpu())
         indices.append(torch.stack([i for _, i in answers], dim=1).cpu())
+        if step % 250 == 0:
+            print(f"{step * batch_size}/{len(dataset)} images")
     return torch.cat(probs).double().numpy(), torch.cat(indices).numpy()
 
 
