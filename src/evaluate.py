@@ -5,53 +5,62 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from .model import Detector, score
+from .model import Detector
+
+
+def groups(models: list, family_of: dict) -> dict:
+    """{family: the columns of its classes} for the classes of the general expert. family_of: generator -> family
+    (model.families of the config, turned over). A class that is not there stays on its own: a generator without
+    a family, or a class that is a family already."""
+    cols = {}
+    for j, name in enumerate(models):
+        cols.setdefault(family_of.get(name, name), []).append(j)
+    return cols
 
 
 @torch.no_grad()
 def predict(model: Detector, dataset, device: str, batch_size: int = 32, workers: int = 4):
-    """N images through the K experts of the model. prob [N, K]: the probability that the image is generated,
-    by every expert. index [N, K]: the most likely model of every expert, as its place in expert.models."""
+    """N images through the general expert. odds [N]: the log-odds that the image is generated, log(p / (1 - p)).
+    share [N, m]: the probabilities of its m classes for a generated image, every row sums to 1."""
     model.eval().to(device)
-    probs, indices = [], []
+    odds, share = [], []
     for step, (image, _) in enumerate(DataLoader(dataset, batch_size=batch_size, num_workers=workers), 1):
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device == "cuda"):
-            answers = [score(logits) for logits in model(image.to(device)).values()]
-        probs.append(torch.stack([p for p, _ in answers], dim=1).cpu())
-        indices.append(torch.stack([i for _, i in answers], dim=1).cpu())
+            logits = model(image.to(device), ["all"])["all"].float()
+        odds.append((logits[:, 1:].logsumexp(dim=1) - logits[:, 0]).cpu())
+        share.append(logits[:, 1:].softmax(dim=1).cpu())
         if step % 250 == 0:
             print(f"{step * batch_size}/{len(dataset)} images")
-    return torch.cat(probs).double().numpy(), torch.cat(indices).numpy()
+    return torch.cat(odds).double().numpy(), torch.cat(share).double().numpy()
 
 
-def thresholds(real: np.ndarray, alpha: float) -> np.ndarray:
-    """One threshold per expert, from real images only: real [n, K] are the probabilities the K experts gave to n
-    calibration reals. Every expert gets the same share of the false alarms: its threshold is the same quantile
-    of its own probabilities on the reals, and the quantile is the lowest one at which at most alpha of the
-    reals pass any of the K thresholds."""
+def threshold(real: np.ndarray, alpha: float) -> float:
+    """From real images only: the lowest of the log-odds of n calibration reals that at most alpha of them exceed
+    (n + 1 as in conformal prediction: a new real exceeds it with probability <= alpha)."""
     n = len(real)
-    place = real.argsort(axis=0).argsort(axis=0)  # [n, K]: the place of every real among the reals, by every expert
-    highest = np.sort(place.max(axis=1))          # the highest place of every real over the experts
-    return np.sort(real, axis=0)[highest[min(math.ceil((n + 1) * (1 - alpha)), n) - 1]]
+    return float(np.sort(real)[min(math.ceil((n + 1) * (1 - alpha)), n) - 1])
 
 
-def verdict(prob: np.ndarray, thr: np.ndarray):
-    """generated [N]: some expert is above its threshold. winner [N]: the expert furthest above its own."""
-    return (prob > thr).any(axis=1), (prob - thr).argmax(axis=1)
+def name_family(share: np.ndarray, cols: dict) -> np.ndarray:
+    """[N] the most likely family of every image: the probabilities of the classes of a family are summed."""
+    return np.array(list(cols))[np.stack([share[:, c].sum(axis=1) for c in cols.values()], axis=1).argmax(axis=1)]
 
 
-def report(model: Detector, thr: np.ndarray, reals: dict, fakes: list) -> str:
-    """reals: {source: prob [n, K]} -> measured FPR. fakes: [(group, prob [n, K], index [n, K])] -> TPR, the expert
-    that answers for the group most often, the model it names most often and, for a generator the model was
-    trained on, how often the model is named exactly."""
-    names, seen = list(model.experts), set(model.experts["all"].models)
+def report(hit: np.ndarray, named: np.ndarray, group: np.ndarray, truth: np.ndarray) -> str:
+    """Tables for N test images. hit [N]: called generated. named [N]: the family the model names.
+    group [N]: the real source or the generator. truth [N]: "" for a real, the family of a generated image,
+    "?" when the model was not trained on its generator."""
     lines = ["| real source | n | FPR |", "|---|---|---|"]
-    lines += [f"| {name} | {len(prob)} | {verdict(prob, thr)[0].mean():.3f} |" for name, prob in reals.items()]
-    lines += ["", "| fake group | n | TPR | expert | named as | exact model |", "|---|---|---|---|---|---|"]
-    for group, prob, index in fakes:
-        hit, winner = verdict(prob, thr)
-        named = [model.experts[names[w]].models[index[i, w]] for i, w in enumerate(winner)]
-        expert, model_name = Counter(names[w] for w in winner).most_common(1)[0][0], Counter(named).most_common(1)[0][0]
-        exact = f"{np.mean([name == group for name in named]):.3f}" if group in seen else ""
-        lines.append(f"| {group} | {len(prob)} | {hit.mean():.3f} | {expert} | {model_name} | {exact} |")
+    lines += [f"| {g} | {(group == g).sum()} | {hit[group == g].mean():.3f} |" for g in sorted(set(group[truth == ""]))]
+    lines += ["", "| generator | family | n | TPR | named as | right family |", "|---|---|---|---|---|---|"]
+    for g in sorted(set(group[truth != ""])):
+        at = group == g
+        right = "" if truth[at][0] == "?" else f"{(named[at] == truth[at]).mean():.3f}"
+        lines.append(f"| {g} | {truth[at][0]} | {at.sum()} | {hit[at].mean():.3f} | "
+                     f"{Counter(named[at]).most_common(1)[0][0]} | {right} |")
+    lines += ["", "| family | n | TPR | right family | most often taken for |", "|---|---|---|---|---|"]
+    for f in sorted(set(truth) - {"", "?"}):
+        at = truth == f
+        taken = ", ".join(f"{name} {n / at.sum():.3f}" for name, n in Counter(named[at & (named != f)]).most_common(2))
+        lines.append(f"| {f} | {at.sum()} | {hit[at].mean():.3f} | {(named[at] == f).mean():.3f} | {taken} |")
     return "\n".join(lines)

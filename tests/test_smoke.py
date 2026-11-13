@@ -16,7 +16,7 @@ from PIL import Image
 
 from src.data import ImageDataset, distribution, load_pool, load_rows, render_folder, save_rows
 from src.data.download import _store
-from src.evaluate import predict, report, thresholds, verdict
+from src.evaluate import groups, name_family, predict, report, threshold
 from src.model import Detector, score
 from src.train import stats, train, trained
 
@@ -39,7 +39,7 @@ def make_rows(root, n=8, size=200):
 
 
 def test_score_and_thresholds():
-    """One softmax per expert: "generated" is everything but the class "real". Every expert has its own threshold."""
+    """One softmax: "generated" is everything but the class "real". One threshold from reals; classes -> families."""
     logits = torch.tensor([[4.0, 0.0, 0.0], [0.0, 1.0, 3.0]])
     prob, index = score(logits.bfloat16())
     assert prob.dtype == torch.float32 and index.tolist() == [0, 1]
@@ -52,13 +52,13 @@ def test_score_and_thresholds():
     four = stats(torch.tensor([[0.0, 3.0, 0.0], [3.0, 0.0, 0.0], [0.0, 0.0, 3.0], [3.0, 0.0, 0.0]]), torch.tensor([1, 0, 0, 2]))
     assert {k: four[k] for k in ("acc", "prec", "rec", "fpr", "model_acc")} == dict(acc=0.5, prec=0.5, rec=0.5, fpr=0.5, model_acc=0.5)
 
-    real = np.random.default_rng(0).random((1000, 3)) * [1.0, 0.5, 0.1]  # three experts, different ranges on reals
-    thr = thresholds(real, 0.05)
-    assert 0.03 < verdict(real, thr)[0].mean() <= 0.05  # together: at most alpha of the reals
-    assert np.ptp((real > thr).mean(axis=0)) < 0.005    # and every expert has the same share of them
-    hit, winner = verdict(np.array([[0.2, 0.2, 0.2], [0.0, 0.0, 0.0]]), thr)  # 0.2 is high for the third expert only
-    assert hit.tolist() == [True, False] and winner[0] == 2
-    assert thresholds(np.array([[0.1], [0.5], [0.9], [0.3]]), 0.5).tolist() == [0.5]
+    real = np.random.default_rng(0).random(1000)
+    assert 0.03 < (real > threshold(real, 0.05)).mean() <= 0.05  # at most alpha of the reals
+    assert threshold(np.array([0.1, 0.5, 0.9, 0.3]), 0.5) == 0.5
+    cols = groups(["a1", "b1", "a2", "alone"], {"a1": "A", "a2": "A", "b1": "B"})  # models -> their families
+    assert cols == {"A": [0, 2], "B": [1], "alone": [3]} and groups(["A", "B"], {"a1": "A"}) == {"A": [0], "B": [1]}
+    share = np.array([[0.3, 0.4, 0.3, 0.0], [0.1, 0.2, 0.1, 0.6]])  # A wins the first image by the sum of its models
+    assert name_family(share, cols).tolist() == ["A", "alone"]
 
 
 def same(a, b):
@@ -105,14 +105,22 @@ def test_pipeline(tmp_path):
     kept = all(torch.equal(v, last["expert"][k]) for k, v in loaded.experts["one"].state_dict().items())
     assert last["name"] == "one" and kept == (val_loss[1] <= val_loss[0])  # saved = the epoch with the lowest validation loss
 
-    prob, index = predict(loaded, ImageDataset(rows, 96), "cpu", batch_size=4, workers=0)
-    assert prob.shape == (16, 2) and ((0 < prob) & (prob < 1)).all() and (index[:, 1] == 0).all() and index[:, 0].max() <= 1
+    odds, share = predict(loaded, ImageDataset(rows, 96), "cpu", batch_size=4, workers=0)
+    assert odds.shape == (16,) and share.shape == (16, 2) and np.allclose(share.sum(axis=1), 1)
+    prob = score(loaded(ImageDataset(rows, 96)[0][0][None])["all"])[0].item()  # log-odds of that very probability
+    assert 1 / (1 + math.exp(-odds[0])) == pytest.approx(prob, abs=1e-4)
     real = np.array([r["label"] == 0 for r in rows])
-    thr = thresholds(prob[real], 0.2)
-    table = report(loaded, thr, {"reals": prob[real]}, [("gen0", prob[~real], index[~real]), ("new", prob[~real], index[~real])])
-    seen, unseen = ([c.strip() for c in line.split("|")] for line in table.splitlines()[-2:])
-    assert seen[1:3] == ["gen0", "8"] and seen[4] in ("all", "one") and seen[5] in ("gen0", "gen1") and seen[6]
-    assert unseen[1:3] == ["new", "8"] and unseen[3:6] == seen[3:6] and unseen[6] == ""  # no true name to compare with
+    group = np.array([r["generator"] or "toy" for r in rows])
+    cols = groups(loaded.experts["all"].models, {"gen0": "fam", "gen1": "fam"})
+    named = name_family(share, cols)
+    assert cols == {"fam": [0, 1]} and set(named) == {"fam"}
+    truth = np.where(real, "", np.where(group == "gen0", "fam", "?"))  # gen1 here stands for an unknown generator
+    table = report(odds > threshold(odds[real], 0.2), named, group, truth).splitlines()
+    cells = [[c.strip() for c in line.split("|")[1:-1]] for line in table]
+    assert cells[2][:2] == ["toy", "8"] and float(cells[2][2]) <= 0.2
+    assert cells[6][:3] == ["gen0", "fam", "4"] and cells[6][4:] == ["fam", "1.000"]
+    assert cells[7][:3] == ["gen1", "?", "4"] and cells[7][4:] == ["fam", ""]  # no true family to compare with
+    assert cells[11][:2] == ["fam", "4"] and cells[11][3:] == ["1.000", ""] and len(table) == 12
 
 
 def test_train_resume(tmp_path, monkeypatch):
@@ -358,13 +366,15 @@ def test_scripts_end_to_end(tmp_path):
     run("run_test.py")
     report_md = (run_dir / "report.md").read_text()
     thr = json.loads((run_dir / "thresholds.json").read_text())
-    assert list(thr) == ["all", "fam-a", "fam-b"]
-    assert re.match(r"thresholds for 10% FPR on \d+ validation reals: all ", report_md)
+    assert list(thr) == ["alpha", "threshold"] and thr["alpha"] == 0.1
+    assert re.match(r"The general expert, one threshold: log-odds \S+, exceeded by 10.0% of \d+ validation reals", report_md)
     assert f"Test part: {sizes['test'][0]} reals and {sizes['test'][1]} generated images" in report_md
-    assert "| only the general one |" in report_md and "| only the families |" in report_md
-    assert "| laion |" in report_md and "| sid/real |" in report_md and "| sid-edit |" in report_md
-    experts = [line.split("|")[4].strip() for line in report_md.splitlines() if line.startswith(("| gen-", "| sid-"))]
-    assert len(experts) >= 4 and set(experts) <= set(thr)
+    assert "| 0.1% |" in report_md and "| 10.0% (used) |" in report_md
+    assert "| laion |" in report_md and "| sid/real |" in report_md and "| sid-edit | ? |" in report_md
+    table = [[c.strip() for c in line.split("|")[1:-1]] for line in report_md.splitlines() if line.startswith("|")]
+    named = {row[4] for row in table if len(row) == 6 and row[0].startswith(("gen-", "sid-"))}
+    assert named and named <= {"fam-a", "fam-b", "gen-new"}
+    assert {row[0] for row in table if len(row) == 5} >= {"fam-a", "fam-b", "gen-new"}  # the table of families
 
     import matplotlib  # the predict notebook, cell by cell, with the trained tiny model
     matplotlib.use("Agg")
@@ -388,8 +398,8 @@ def test_scripts_end_to_end(tmp_path):
         return ns
 
     ns = notebook("predict.ipynb")
-    assert ns["thresholds"] == thr and set(ns["result"]) == set(thr)
-    assert all(0 <= prob <= 1 and name in ("gen-a", "gen-b", "gen-new") for prob, name in ns["result"].values())
+    assert ns["threshold"] == thr["threshold"] and 0 <= ns["score"] <= 1
+    assert set(ns["result"]) == {"fam-a", "fam-b", "gen-new"} and sum(ns["result"].values()) == pytest.approx(1, abs=1e-4)
     for p in sorted((tmp_path / "my_images").iterdir()):  # the notebook prepares an image exactly as run_test.py
         assert torch.equal(ns["prepare"](p), ImageDataset([{"path": str(p), "label": 0}], cfg["train"]["size"])[0][0])
 
@@ -405,7 +415,7 @@ def test_store_and_renders(tmp_path):
     assert path.suffix == ".png" and size == (2000, 1500) and path.read_bytes() == buf.getvalue()  # untouched
     assert _store(buf.getvalue(), tmp_path / "small", 1600) is None  # too small: skipped
     assert _store(b"not an image", tmp_path / "bad", 512) is None    # broken: skipped
-    assert thresholds(np.linspace(0, 1, 101)[:, None], 0.05)[0] >= 0.94
+    assert threshold(np.linspace(0, 1, 101), 0.05) >= 0.94
     items = render_folder(tmp_path / "renders", 4, "test")
     assert len(items) == 4 and all(min(Image.open(it["path"]).size) >= 512 for it in items)
 
