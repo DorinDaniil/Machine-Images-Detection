@@ -16,11 +16,12 @@ from PIL import Image
 
 from src.data import ImageDataset, distribution, load_pool, load_rows, render_folder, save_rows
 from src.data.download import _store
-from src.evaluate import groups, name_family, predict, report, threshold
+from src.evaluate import calibrate, compare, predict, report, threshold
 from src.model import Detector, score
-from src.train import stats, train, trained
+from src.train import contrastive, stats, train
 
-CFG = dict(device="cpu", size=96, batch_size=2, num_workers=0, lr=1e-3, head_lr=1e-2, weight_decay=0.0, epochs=2, save_every=3)
+CFG = dict(device="cpu", size=96, batch_size=2, num_workers=0, lr=1e-3, head_lr=1e-2, weight_decay=0.0, epochs=2,
+           save_every=3, balance=0.0, contrast=0.0)
 
 
 def make_rows(root, n=8, size=200):
@@ -38,27 +39,40 @@ def make_rows(root, n=8, size=200):
     return rows
 
 
-def test_score_and_thresholds():
-    """One softmax: "generated" is everything but the class "real". One threshold from reals; classes -> families."""
+def test_score_and_threshold():
+    """One softmax: "generated" is everything but the class "real". The threshold comes from reals only."""
     logits = torch.tensor([[4.0, 0.0, 0.0], [0.0, 1.0, 3.0]])
     prob, index = score(logits.bfloat16())
     assert prob.dtype == torch.float32 and index.tolist() == [0, 1]
     assert prob[0].item() == pytest.approx(2 / (math.e ** 4 + 2), abs=1e-3)
 
-    p = 1 - torch.softmax(logits, dim=1)[:, 0]  # the loss = "generated or real" + "which model" for the generated
+    p = 1 - torch.softmax(logits, dim=1)[:, 0]  # the loss = "generated or real" + "which family" for the generated
     by_hand = (-torch.log(1 - p[0]) - torch.log(p[1]) + F.cross_entropy(logits[1:, 1:], torch.tensor([1]))) / 2
     assert F.cross_entropy(logits, torch.tensor([0, 2])).item() == pytest.approx(by_hand.item(), abs=1e-5)
 
     four = stats(torch.tensor([[0.0, 3.0, 0.0], [3.0, 0.0, 0.0], [0.0, 0.0, 3.0], [3.0, 0.0, 0.0]]), torch.tensor([1, 0, 0, 2]))
-    assert {k: four[k] for k in ("acc", "prec", "rec", "fpr", "model_acc")} == dict(acc=0.5, prec=0.5, rec=0.5, fpr=0.5, model_acc=0.5)
+    assert {k: four[k] for k in ("acc", "prec", "rec", "fpr", "family_acc")} == dict(acc=0.5, prec=0.5, rec=0.5, fpr=0.5, family_acc=0.5)
 
     real = np.random.default_rng(0).random(1000)
     assert 0.03 < (real > threshold(real, 0.05)).mean() <= 0.05  # at most alpha of the reals
     assert threshold(np.array([0.1, 0.5, 0.9, 0.3]), 0.5) == 0.5
-    cols = groups(["a1", "b1", "a2", "alone"], {"a1": "A", "a2": "A", "b1": "B"})  # models -> their families
-    assert cols == {"A": [0, 2], "B": [1], "alone": [3]} and groups(["A", "B"], {"a1": "A"}) == {"A": [0], "B": [1]}
-    share = np.array([[0.3, 0.4, 0.3, 0.0], [0.1, 0.2, 0.1, 0.6]])  # A wins the first image by the sum of its models
-    assert name_family(share, cols).tolist() == ["A", "alone"]
+
+
+def test_contrastive():
+    """Supervised InfoNCE: lower when the classes are apart; one image counted by hand; vectors of earlier steps
+    in the bank are positives and negatives too."""
+    z = F.normalize(torch.tensor([[1.0, 0.0], [1.0, 0.2], [0.0, 1.0], [0.2, 1.0]]), dim=1)
+    y, mixed = torch.tensor([0, 0, 1, 1]), torch.tensor([0, 1, 0, 1])
+    assert contrastive(z, y, z, y) < contrastive(z, mixed, z, mixed)
+    sim = z[0] @ z[1:].T / 0.1  # image 0 against the others, itself left out; its only positive is image 1
+    assert contrastive(z[:1], y[:1], z, y).item() == pytest.approx((sim.logsumexp(0) - sim[0]).item(), abs=1e-5)
+    assert contrastive(z[:1], y[:1], z[[0, 2, 3]], y[[0, 2, 3]]).item() == 0  # no positives: zero, not NaN
+    old = F.normalize(torch.tensor([[1.0, 0.1]]), dim=1)  # a vector of an earlier step, class 0, close to image 0
+    loss = contrastive(z[[0, 2]], y[[0, 2]], torch.cat([z[[0, 2]], old]), torch.tensor([0, 1, 0]))
+    assert 0 < loss.item() < 0.01
+    z = z.clone().requires_grad_()
+    contrastive(z, y, z.detach(), y).backward()
+    assert z.grad.abs().sum() > 0
 
 
 def same(a, b):
@@ -66,61 +80,61 @@ def same(a, b):
 
 
 def test_pipeline(tmp_path):
-    """The general expert with the trunk, then a family expert on the frozen trunk; save, load, predict, report."""
+    """Train with both extras on, save, load, predict, calibrate, report, compare."""
     import copy
 
     rows = make_rows(tmp_path, n=16)
     save_rows(rows, tmp_path / "rows.csv")
     assert load_rows(tmp_path / "rows.csv")[3]["label"] == 2
     reals, fakes = [r for r in rows if r["label"] == 0], [r for r in rows if r["label"]]
-    cfg, run = dict(CFG, out=str(tmp_path / "run")), tmp_path / "run"
+    run = tmp_path / "runs" / "one"
+    cfg = dict(CFG, out=str(run), balance=0.5, contrast=0.5)
 
-    model = Detector("tiny", 4, {"all": ["gen0", "gen1"]})
+    model = Detector("tiny", ["fam0", "fam1"])
     image, label = ImageDataset(rows, 96)[1]
     assert image.shape == (3, 96, 96) and label == 1
-    assert model(image[None])["all"].shape == (1, 3) and model.features(image[None]).shape == (1, 64)
-    whole = Detector("tiny", 0, {"all": ["gen0"]})  # shared 0: nothing in the trunk, the expert is the whole network
-    assert not list(whole.trunk.parameters()) and whole(image[None])["all"].shape == (1, 2)
+    assert model(image[None]).shape == (1, 3) and model.features(image[None]).shape == (1, 64)
 
-    start = copy.deepcopy(model.trunk)
-    train(model, "all", reals[2:], fakes[2:], rows[:4], cfg)
-    assert not same(start, model.trunk)  # the general expert is trained together with the trunk
-    assert trained(run, "all", 2) and not trained(run, "all", 3) and not trained(run, "one", 2)
-
-    model = Detector.load(run, names=["all"])
-    model.add("one", ["gen1"])  # a family expert: a copy of the general one with its own head
-    assert same(model.experts["one"].stages, model.experts["all"].stages) and model.experts["one"].head.out_features == 2
-    before = copy.deepcopy(model)
-    gen1 = [{**r, "label": 1} for r in fakes if r["generator"] == "gen1"]
-    train(model, "one", reals[2:], gen1[1:], gen1[:1] + reals[:1], cfg)
-    assert same(before.trunk, model.trunk) and same(before.experts["all"], model.experts["all"])  # only the expert learns
-    assert not same(before.experts["one"], model.experts["one"])
-
-    assert sorted(p.name for p in (run / "experts").iterdir()) == ["all.pt", "one.pt"] and (run / "trunk.pt").exists()
-    loaded = Detector.load(run)
-    assert list(loaded.experts) == ["all", "one"] and loaded.experts["one"].models == ["gen1"] and loaded.config == model.config
-    log = (run / "metrics" / "one.csv").read_text().splitlines()
+    start = copy.deepcopy(model)
+    train(model, reals[2:], fakes[2:], rows[:4], cfg)
+    assert not same(start.net, model.net) and not same(start.head, model.head)
+    assert sorted(p.name for p in run.iterdir()) == ["metrics.csv", "model.pt", "state.pt"]
+    loaded = Detector.load(run / "model.pt")
+    assert loaded.classes == ["fam0", "fam1"] and loaded.config == model.config
+    log = (run / "metrics.csv").read_text().splitlines()
     val_loss = [float(line.split(",")[log[0].split(",").index("val_loss")]) for line in log[1:]]
     last = torch.load(run / "state.pt", weights_only=False)
-    kept = all(torch.equal(v, last["expert"][k]) for k, v in loaded.experts["one"].state_dict().items())
-    assert last["name"] == "one" and kept == (val_loss[1] <= val_loss[0])  # saved = the epoch with the lowest validation loss
+    kept = all(torch.equal(v, last["model"][k]) for k, v in loaded.state_dict().items())
+    assert kept == (val_loss[1] <= val_loss[0])  # saved = the epoch with the lowest validation loss
 
-    odds, share = predict(loaded, ImageDataset(rows, 96), "cpu", batch_size=4, workers=0)
-    assert odds.shape == (16,) and share.shape == (16, 2) and np.allclose(share.sum(axis=1), 1)
-    prob = score(loaded(ImageDataset(rows, 96)[0][0][None])["all"])[0].item()  # log-odds of that very probability
+    data = ImageDataset(rows, 96)
+    odds, index = predict(loaded, data, "cpu", batch_size=4, workers=0)
+    assert odds.shape == index.shape == (16,) and set(index.tolist()) <= {0, 1}
+    prob = score(loaded(data[0][0][None]))[0].item()  # log-odds of that very probability
     assert 1 / (1 + math.exp(-odds[0])) == pytest.approx(prob, abs=1e-4)
+
     real = np.array([r["label"] == 0 for r in rows])
+    shift = calibrate(loaded, odds[real], 0.2)  # the bias of "real" moves: p = 0.5 is now the threshold
+    again = predict(loaded, data, "cpu", batch_size=4, workers=0)[0]
+    assert np.allclose(again, odds - shift, atol=1e-4) and (again[real] > 1e-4).mean() <= 0.2
+    assert calibrate(loaded, again[real], 0.2) == pytest.approx(0, abs=1e-4)  # a second time changes nothing
+
     group = np.array([r["generator"] or "toy" for r in rows])
-    cols = groups(loaded.experts["all"].models, {"gen0": "fam", "gen1": "fam"})
-    named = name_family(share, cols)
-    assert cols == {"fam": [0, 1]} and set(named) == {"fam"}
-    truth = np.where(real, "", np.where(group == "gen0", "fam", "?"))  # gen1 here stands for an unknown generator
-    table = report(odds > threshold(odds[real], 0.2), named, group, truth).splitlines()
-    cells = [[c.strip() for c in line.split("|")[1:-1]] for line in table]
-    assert cells[2][:2] == ["toy", "8"] and float(cells[2][2]) <= 0.2
-    assert cells[6][:3] == ["gen0", "fam", "4"] and cells[6][4:] == ["fam", "1.000"]
-    assert cells[7][:3] == ["gen1", "?", "4"] and cells[7][4:] == ["fam", ""]  # no true family to compare with
-    assert cells[11][:2] == ["fam", "4"] and cells[11][3:] == ["1.000", ""] and len(table) == 12
+    named = np.array(loaded.classes)[index]
+    truth = np.where(real, "", np.where(group == "gen0", "fam0", "?"))  # gen1 here stands for an unknown generator
+    text, numbers = report(again > 1e-4, named, group, truth)
+    cells = [[c.strip() for c in line.split("|")[1:-1]] for line in text.splitlines()]
+    assert cells[2][:2] == ["toy", "8"] and float(cells[2][2]) <= 0.2 and numbers["FPR toy"] <= 0.2
+    assert cells[6][:3] == ["gen0", "fam0", "4"] and cells[6][5] != ""
+    assert cells[7][:3] == ["gen1", "?", "4"] and cells[7][5] == ""  # no true family to compare with
+    assert cells[11][:2] == ["fam0", "4"] and len(cells) == 12 and list(numbers) == ["FPR toy", "TPR gen0", "TPR gen1"]
+
+    (run / "report.json").write_text(json.dumps(numbers))  # every run with a report.json is a column
+    (tmp_path / "runs" / "two").mkdir()
+    (tmp_path / "runs" / "two" / "report.json").write_text(json.dumps({"FPR toy": 0.5, "new": 1.0}))
+    table = compare(tmp_path / "runs").splitlines()
+    assert table[0] == "| | one | two |" and table[2] == f"| FPR toy | {numbers['FPR toy']:.3f} | 0.500 |"
+    assert table[-1] == "| new |  | 1.000 |" and len(table) == 2 + 4
 
 
 def test_train_resume(tmp_path, monkeypatch):
@@ -141,20 +155,22 @@ def test_train_resume(tmp_path, monkeypatch):
     reals, fakes = [r for r in rows if r["label"] == 0], [r for r in rows if r["label"]]
     cfg, run = dict(CFG, out=str(tmp_path / "run")), tmp_path / "run"
     with pytest.raises(RuntimeError, match="power cut"):  # 4 steps of 2 images in an epoch: the 4th step of epoch 2
-        train(Detector("tiny", 4, {"all": ["gen0", "gen1"]}), "all", reals, fakes, rows[:4], cfg)
+        train(Detector("tiny", ["fam0", "fam1"]), reals, fakes, rows[:4], cfg)
     state = torch.load(run / "state.pt", weights_only=False)
-    assert state["name"] == "all" and (state["epoch"], state["step"]) == (2, 3)
-    assert len(state["log"]) == 1 and state["scheduler"]["last_epoch"] == 7 and not trained(run, "all", 2)
+    assert (state["epoch"], state["step"]) == (2, 3)
+    assert len(state["log"]) == 1 and state["scheduler"]["last_epoch"] == 7
 
     Crash.at = 0
-    resumed = Detector("tiny", 4, {"all": ["gen0", "gen1"]})  # as a new process: weights come from the state
-    train(resumed, "all", reals, fakes, rows[:4], cfg, resume=True)
+    resumed = Detector("tiny", ["fam0", "fam1"])  # as a new process: weights come from the state
+    train(resumed, reals, fakes, rows[:4], cfg, resume=True)
     state = torch.load(run / "state.pt", weights_only=False)
-    assert (state["epoch"], state["step"]) == (3, 0) and trained(run, "all", 2)
+    assert (state["epoch"], state["step"]) == (3, 0)
     assert state["scheduler"]["last_epoch"] == 8 and Crash.reads == 16 + 2  # only the one step that was left
-    epochs = [line.split(",")[0] for line in (run / "metrics" / "all.csv").read_text().splitlines()[1:]]
+    epochs = [line.split(",")[0] for line in (run / "metrics.csv").read_text().splitlines()[1:]]
     assert epochs == ["1", "2"]
-    assert all(torch.equal(v, state["expert"][k]) for k, v in resumed.experts["all"].state_dict().items())
+    assert all(torch.equal(v, state["model"][k]) for k, v in resumed.state_dict().items())
+    train(Detector("tiny", ["fam0", "fam1"]), reals, fakes, rows[:4], cfg, resume=True)  # nothing is left to train
+    assert Crash.reads == 16 + 2
 
 
 def test_views(tmp_path):
@@ -291,8 +307,8 @@ def test_sid_names_unique(tmp_path, monkeypatch):
 
 
 def test_scripts_end_to_end(tmp_path):
-    """download_data.py, run_train.py, run_test.py and the predict and t-SNE notebooks on a tiny model and tiny data,
-    as on the server."""
+    """download_data.py, run_train.py (the plain run and a variant with --set), run_test.py and the predict and
+    t-SNE notebooks on a tiny model and tiny data, as on the server."""
     import subprocess
     import sys
 
@@ -332,15 +348,15 @@ def test_scripts_end_to_end(tmp_path):
                     "test": {"n_real": 10, "real_sources": ["docci"], "n_per_model": 10},
                     "real_dirs": [str(tmp_path / "my_reals")], "val_share": 0.2, "test_share": 0.2,
                     "sid": {"n_per_class": 3}, "n_render": 8, "render_train": 0.25},
-           "model": {"backbone": "tiny", "shared": 4, "families": {"fam-a": ["gen-a"], "fam-b": ["gen-b"]}},
-           "train": {"size": 128, "epochs": 2, "batch_size": 4, "val_size": 4, "lr": 1e-3, "head_lr": 1e-2,
-                     "weight_decay": 0.0, "save_every": 2, "num_workers": 0, "device": "cpu", "out": "runs/experts"},
-           "test": {"alpha": 0.1, "max_calib": 6}}
+           "model": {"backbone": "tiny", "families": {"fam-a": ["gen-a"], "fam-b": ["gen-b"]}},
+           "train": {"size": 128, "epochs": 2, "batch_size": 4, "val_size": 4, "balance": 0.0, "contrast": 0.0,
+                     "lr": 1e-3, "head_lr": 1e-2, "weight_decay": 0.0, "save_every": 2, "num_workers": 0,
+                     "device": "cpu", "alpha": 0.1, "max_calib": 6, "out": "runs/base"}}
     (tmp_path / "tiny.yaml").write_text(yaml.safe_dump(cfg))
 
-    def run(script, *args):  # offline: a call to the Hub fails at once instead of downloading
+    def run(script, *args, config="tiny.yaml"):  # offline: a call to the Hub fails at once instead of downloading
         env = dict(os.environ, HF_HUB_OFFLINE="1", HF_DATASETS_OFFLINE="1")
-        done = subprocess.run([sys.executable, str(repo / "scripts" / script), "--config", "tiny.yaml", *args],
+        done = subprocess.run([sys.executable, str(repo / "scripts" / script), "--config", config, *args],
                               cwd=tmp_path, capture_output=True, text=True, timeout=300, env=env)
         assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-3000:]
         return done.stdout
@@ -352,34 +368,38 @@ def test_scripts_end_to_end(tmp_path):
              re.findall(r"^(train|val|test): (\d+) reals from \d+ sources, (\d+) generated images", train_log, re.M)}
     assert sum(n for n, _ in sizes.values()) == 24 + 8 + 8 + 8 + round(0.25 * (sizes["train"][0] / 1.25))  # + renders
     assert sum(n for _, n in sizes.values()) == 44 and min(min(pair) for pair in sizes.values()) > 0
-    assert "known to the general expert only: gen-new" in train_log
-    assert re.search(r"expert all: \d+ generated images of 3 models", train_log)
-    assert re.search(r"expert fam-b: \d+ generated images of 1 models", train_log) and "fam-b: best validation loss" in train_log
-    run_dir = tmp_path / "runs" / "experts"
-    assert sorted(p.name for p in (run_dir / "experts").iterdir()) == ["all.pt", "fam-a.pt", "fam-b.pt"]
+    assert "classes: real, fam-a, fam-b, gen-new" in train_log  # gen-new is in no family: a class of its own
     assert re.search(r"20 +45\.5% +gen-a +fam-a\n", train_log) and re.search(r"8 +18\.2% +gen-new +-\n", train_log)
-    again = run("run_train.py", "--resume")  # nothing is left to train
-    assert all(f"{name}: trained, skipped" in again for name in ("all", "fam-a", "fam-b")) and "epoch 1" not in again
-    only = run("run_train.py", "--only", "fam-a")  # one expert again, on the same trunk
-    assert "expert fam-a:" in only and "expert all:" not in only and "expert fam-b:" not in only
+    runs = tmp_path / "runs"
+    assert sorted(p.name for p in (runs / "base").iterdir()) == ["config.yaml", "metrics.csv", "model.pt", "state.pt"]
+    assert yaml.safe_load((runs / "base" / "config.yaml").read_text()) == cfg
+    assert re.search(r"calibrated on \d+ validation reals", train_log)
+    again = run("run_train.py", "--resume", config="runs/base/config.yaml")  # nothing is left to train
+    assert "all epochs are done" in again and "epoch 1 step" not in again and re.search(r"moved by -?0\.000,", again)
+    variant = run("run_train.py", "--set", "train.out=runs/both", "train.contrast=0.5", "train.balance=0.5")
+    assert "balance 0.5, contrast 0.5" in variant and (runs / "both" / "model.pt").exists()
+    assert yaml.safe_load((runs / "both" / "config.yaml").read_text())["train"]["contrast"] == 0.5
 
-    run("run_test.py")
-    report_md = (run_dir / "report.md").read_text()
-    thr = json.loads((run_dir / "thresholds.json").read_text())
-    assert list(thr) == ["alpha", "threshold"] and thr["alpha"] == 0.1
-    assert re.match(r"The general expert, one threshold: log-odds \S+, exceeded by 10.0% of \d+ validation reals", report_md)
+    run("run_test.py", config="runs/base/config.yaml")
+    report_md = (runs / "base" / "report.md").read_text()
+    numbers = json.loads((runs / "base" / "report.json").read_text())
+    assert re.match(r"The model as it is: an image is called generated when p\(generated\) > 0\.5\. \S+% of \d+ validation reals", report_md)
     assert f"Test part: {sizes['test'][0]} reals and {sizes['test'][1]} generated images" in report_md
-    assert "| 0.1% |" in report_md and "| 10.0% (used) |" in report_md
+    assert "| p > 0.5, the model as it is |" in report_md and ", target FPR 0.1% |" in report_md
     assert "| laion |" in report_md and "| sid/real |" in report_md and "| sid-edit | ? |" in report_md
     table = [[c.strip() for c in line.split("|")[1:-1]] for line in report_md.splitlines() if line.startswith("|")]
     named = {row[4] for row in table if len(row) == 6 and row[0].startswith(("gen-", "sid-"))}
     assert named and named <= {"fam-a", "fam-b", "gen-new"}
     assert {row[0] for row in table if len(row) == 5} >= {"fam-a", "fam-b", "gen-new"}  # the table of families
+    assert list(numbers)[:6] == ["FPR reals", "FPR SID reals", "TPR generators", "TPR sid-full", "precision", "family named right"]
+    assert {"FPR laion", "FPR sid/real", "TPR gen-a", "TPR sid-edit"} <= set(numbers)
+    assert (runs / "compare.md").read_text().splitlines()[0] == "| | base |"
+    run("run_test.py", config="runs/both/config.yaml")  # the second tested run is a second column
+    side = (runs / "compare.md").read_text().splitlines()
+    assert side[0] == "| | base | both |" and side[2].startswith("| FPR reals | ") and len(side[2].split("|")) == 5
 
-    import matplotlib  # the predict notebook, cell by cell, with the trained tiny model
+    import matplotlib  # the notebooks, cell by cell, with the trained tiny model of runs/base
     matplotlib.use("Agg")
-    (tmp_path / "configs").mkdir()
-    (tmp_path / "configs" / "train.yaml").write_text(yaml.safe_dump(cfg))
     (tmp_path / "my_images").mkdir()
     sample = sorted((data / "real" / "docci").iterdir())[0]
     Image.open(sample).save(tmp_path / "my_images" / "example.jpg")
@@ -398,8 +418,8 @@ def test_scripts_end_to_end(tmp_path):
         return ns
 
     ns = notebook("predict.ipynb")
-    assert ns["threshold"] == thr["threshold"] and 0 <= ns["score"] <= 1
-    assert set(ns["result"]) == {"fam-a", "fam-b", "gen-new"} and sum(ns["result"].values()) == pytest.approx(1, abs=1e-4)
+    assert 0 <= ns["score"] <= 1 and list(ns["result"]) == ["fam-a", "fam-b", "gen-new"]
+    assert sum(ns["result"].values()) == pytest.approx(1, abs=1e-4)
     for p in sorted((tmp_path / "my_images").iterdir()):  # the notebook prepares an image exactly as run_test.py
         assert torch.equal(ns["prepare"](p), ImageDataset([{"path": str(p), "label": 0}], cfg["train"]["size"])[0][0])
 

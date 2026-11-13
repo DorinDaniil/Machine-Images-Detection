@@ -1,9 +1,9 @@
-# Real images against images of many open and API generators (OpenFake). An ensemble on one small backbone:
-# a shared trunk (DINOv3 ConvNeXt-Tiny), a general expert over every generator and one expert per generator
-# family. Every expert is trained on its own, "its generators against the reals", and also names the exact model.
-# An image is called generated when any expert is above its own threshold. Whole images resized to 512 x 512.
+# Real images against images of many open and API generators (OpenFake). One plain classifier on a small backbone
+# (DINOv3 ConvNeXt-Tiny): softmax over [real, family 1, ..., family m]. An image is called generated when
+# p(generated) = 1 - p(real) is above 0.5; the family of the generator is the largest of the other classes.
+# Whole images resized to 512 x 512.
 # Data: one pool of folders, data/real/<source>/ and data/fake/<generator>/, plus your own folders with reals.
-# 85 % of every folder is for training, 5 % for validation and the thresholds, 10 % for the test.
+# 85 % of every folder is for training, 5 % for validation and the calibration, 10 % for the test.
 
 data:
   dir: data
@@ -61,8 +61,7 @@ data:
   real_dirs: []             # more folders with real images, e.g. [/data/logos, /data/scans]: every image under them,
                             #   through all subfolders, joins the reals. The report has a line per <folder>/<subfolder>.
                             #   A folder put into data/real/ is picked up the same way
-  val_share: 0.05           # of every folder, by the hash of "<folder>/<file>": the best epoch of every expert and
-                            #   the thresholds
+  val_share: 0.05           # of every folder, by the hash of "<folder>/<file>": the best epoch and the calibration
   test_share: 0.10          # of every folder, never trained on: report.md. The split is the same on every run,
                             #   an image keeps its part when images are added
   sid:                      # SID_Set validation, another dataset: the test of local edits
@@ -74,13 +73,9 @@ data:
 
 model:
   backbone: convnext_tiny.dinov3_lvd1689m   # timm, no access request; 28M parameters. Larger: convnext_small.dinov3_lvd1689m
-  shared: 4                 # the trunk = the stem and the first 3 of the 4 stages, computed once per image; every
-                            #   expert owns a copy of the last stage (15M parameters, ~25 ms on a CPU).
-                            #   3: the two last stages per expert; 0: every expert is a whole separate network
-  families:                 # one expert per family: the generators of one maker or one architecture against the
-                            #   reals. A new version of a known family is caught by its expert. Regroup freely;
-                            #   a generator is the name of a folder in data/fake.
-                            #   run_train.py adds the general expert "all": every generator, trained first
+  families:                 # the classes of the model next to "real": the generators of one maker or one
+                            #   architecture. A new version of a known family falls into its class. Regroup freely;
+                            #   a generator is the name of a folder in data/fake
     openai: [gpt-image-1, gpt-image-1.5, gpt-image-2, dalle-3]
     google: [imagen-3.0-002, imagen-4.0, nano-banana-2, nano-banana-pro]
     midjourney: [midjourney-6, midjourney-7]
@@ -95,9 +90,10 @@ model:
     dit: [sd-3.5, hidream-i1-full, lumina-17-2-25]                      # other open diffusion transformers
     video_cn: [wan-video-2.1, wan-video-2.2, wan-video-2.5, hunyuan-video]   # frames of the Chinese video models
     video: [veo-3, sora-2, ltxv-2.3]                                    # frames of the other video models
-    # A generator of data/fake that is in no family is learnt by the general expert only. Now these are the ones
-    # with too few images for an expert of their own: recraft-v2, recraft-v3, ernie-image, ernie-image-turbo,
-    # frames-23-1-25 (Runway), halfmoon-4-4-25 (Reve)
+    recraft: [recraft-v2, recraft-v3]
+    ernie: [ernie-image, ernie-image-turbo]                             # Baidu
+    # A generator of data/fake that is in no family is a class of its own. Now these are frames-23-1-25 (Runway)
+    # and halfmoon-4-4-25 (Reve)
 
 train:
   size: 512                 # every image, whole, resized to 512 x 512 (aspect not kept), in training and testing;
@@ -108,20 +104,26 @@ train:
                             #   resampling 25 %, blur 15 %, noise 20 %; JPEG q50-95 or WebP (20 %), a second JPEG 25 %;
                             #   the resize; flip, a turn by 90 degrees 5 %. A third of the views get only the
                             #   crop and the compression
-  epochs: 3                 # per expert. An epoch: every generated image of the expert once and as many reals,
-                            #   drawn anew every epoch; then validation, metrics/<name>.csv and state.pt.
-                            #   In all every generated image is seen 6 times: 3 by "all", 3 by its family expert
-  batch_size: 32            # ~10 GB of GPU memory for "all" (the trunk is trained), far less for a family expert
-  val_size: 5000            # per expert: up to this many held-out images, half of them real; the expert is saved
-                            #   at the epoch with the lowest validation loss
-  lr: 5.0e-5                # the trunk and the last stage
+  epochs: 3                 # An epoch: as many generated images as the training part has and as many reals, drawn
+                            #   anew every epoch; then validation, a row in metrics.csv and state.pt
+  batch_size: 32            # ~10 GB of GPU memory
+  val_size: 5000            # up to this many held-out images, half of them real; the model is saved at the epoch
+                            #   with the lowest validation loss
+  balance: 0.0              # how the generated images of an epoch are drawn. 0: every one once. Above 0: an image
+                            #   of a generator with n images comes n ** -balance times as often, so small generators
+                            #   are seen more. 0.5: a generator with 1000 images gets a third of the views of one
+                            #   with 10000, not a tenth; 1: every generator is seen equally often
+  contrast: 0.0             # weight of the supervised InfoNCE of the image vectors, added to the cross-entropy:
+                            #   images of one class (real, or one family) are pulled together, images of different
+                            #   classes pushed apart. Every batch is compared with the vectors of the last steps
+                            #   (4096 of them), so a small batch is enough. 0: off; to try: 0.5
+  lr: 5.0e-5                # the backbone
   head_lr: 1.0e-3           # the linear layer
   weight_decay: 0.05
   save_every: 500           # steps between the saves of state.pt inside an epoch: after a stop --resume goes on from the last one
   num_workers: 8
   device: cuda
-  out: runs/experts         # trunk.pt, experts/<name>.pt, metrics/<name>.csv, thresholds.json, report.md
-
-test:
-  alpha: 0.01               # target false-positive rate of the whole ensemble; thresholds from validation reals only
-  max_calib: 10000          # validation reals used for the thresholds: enough for 1 %
+  alpha: 0.01               # after training the bias of the class "real" is set so that this share of the
+  max_calib: 10000          #   validation reals (up to max_calib of them) has p(generated) > 0.5
+  out: runs/base            # model.pt, metrics.csv, state.pt, config.yaml, report.md, report.json.
+                            #   Another variant next to it: --set train.out=runs/<name> train.contrast=0.5

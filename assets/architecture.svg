@@ -1,93 +1,78 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 630" font-family="Arial, Helvetica, sans-serif" font-size="14" fill="#111">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 580" font-family="Arial, Helvetica, sans-serif" font-size="14" fill="#111">
   <defs>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="#111"/></marker>
-    <marker id="b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="#1f6fb2"/></marker>
   </defs>
-  <rect width="1280" height="630" fill="#fff"/>
+  <rect width="1280" height="580" fill="#fff"/>
 
   <!-- (a) inference -->
-  <text x="30" y="34" font-size="18" font-weight="bold">(a) Inference: one pass of the trunk, one small expert per generator family</text>
+  <text x="30" y="34" font-size="18" font-weight="bold">(a) Inference: one pass, one softmax</text>
   <g stroke="#111" stroke-width="1.5" fill="none">
     <rect x="30" y="128" width="96" height="96" fill="#ececec"/>
-    <rect x="166" y="131" width="232" height="90" rx="4"/>
-    <rect x="438" y="141" width="112" height="70" rx="4"/>
-    <rect x="1118" y="96" width="142" height="160" rx="4"/>
-    <path d="M126 176 H164" marker-end="url(#a)"/>
-    <path d="M398 176 H436" marker-end="url(#a)"/>
-    <path d="M1080 176 H1116" marker-end="url(#a)"/>
-  </g>
-  <g stroke="#1f6fb2" stroke-width="1.5" fill="none">
-    <rect x="610" y="62" width="330" height="44" rx="4"/>
-    <rect x="610" y="116" width="330" height="44" rx="4"/>
-    <rect x="610" y="170" width="330" height="44" rx="4"/>
-    <rect x="610" y="262" width="330" height="44" rx="4"/>
-    <rect x="980" y="62" width="100" height="244" rx="4"/>
-    <path d="M550 176 H578 V84 H608" marker-end="url(#b)"/>
-    <path d="M578 138 H608" marker-end="url(#b)"/>
-    <path d="M578 176 V192 H608" marker-end="url(#b)"/>
-    <path d="M578 192 V284 H608" marker-end="url(#b)"/>
-    <path d="M940 84 H978" marker-end="url(#b)"/>
-    <path d="M940 138 H978" marker-end="url(#b)"/>
-    <path d="M940 192 H978" marker-end="url(#b)"/>
-    <path d="M940 284 H978" marker-end="url(#b)"/>
+    <rect x="176" y="121" width="250" height="110" rx="4"/>
+    <rect x="476" y="141" width="120" height="70" rx="4"/>
+    <rect x="646" y="76" width="300" height="200" rx="4"/>
+    <rect x="996" y="96" width="254" height="160" rx="4"/>
+    <path d="M126 176 H174" marker-end="url(#a)"/>
+    <path d="M426 176 H474" marker-end="url(#a)"/>
+    <path d="M596 176 H644" marker-end="url(#a)"/>
+    <path d="M946 176 H994" marker-end="url(#a)"/>
   </g>
   <text x="78" y="182" text-anchor="middle" font-style="italic" font-size="16">x</text>
   <text x="78" y="246" text-anchor="middle">3 × 512 × 512</text>
-  <text x="282" y="160" text-anchor="middle" font-weight="bold" font-size="15">Trunk</text>
-  <text x="282" y="181" text-anchor="middle">DINOv3 ConvNeXt-Tiny</text>
-  <text x="282" y="201" text-anchor="middle">stem + stages 1–3, 12M</text>
-  <text x="282" y="246" text-anchor="middle" fill="#555">computed once per image</text>
-  <text x="494" y="172" text-anchor="middle" font-style="italic" font-size="16">f</text>
-  <text x="494" y="194" text-anchor="middle">384 × 32 × 32</text>
-  <g fill="#1f6fb2">
-    <text x="624" y="89" font-weight="bold">all</text>
-    <text x="926" y="89" text-anchor="end">softmax [ real, 36 models ]</text>
-    <text x="624" y="143" font-weight="bold">openai</text>
-    <text x="926" y="143" text-anchor="end">softmax [ real, gpt-image-1, dalle-3 ]</text>
-    <text x="624" y="197" font-weight="bold">google</text>
-    <text x="926" y="197" text-anchor="end">softmax [ real, imagen-3, imagen-4, … ]</text>
-    <text x="775" y="246" text-anchor="middle" font-size="18">⋮</text>
-    <text x="624" y="289" font-weight="bold">video_cn</text>
-    <text x="926" y="289" text-anchor="end">softmax [ real, wan-2.1, wan-2.2, … ]</text>
-    <text x="1030" y="176" text-anchor="middle" font-weight="bold" font-size="15">p &gt; τ ?</text>
-    <text x="1030" y="206" text-anchor="middle" font-size="12">own threshold</text>
-    <text x="1030" y="222" text-anchor="middle" font-size="12">per expert</text>
+  <text x="301" y="160" text-anchor="middle" font-weight="bold" font-size="15">Backbone</text>
+  <text x="301" y="182" text-anchor="middle">DINOv3 ConvNeXt-Tiny</text>
+  <text x="301" y="203" text-anchor="middle">28M parameters</text>
+  <text x="301" y="254" text-anchor="middle" fill="#555">about 0.2 s per image on a CPU</text>
+  <text x="536" y="172" text-anchor="middle" font-style="italic" font-size="16">z</text>
+  <text x="536" y="194" text-anchor="middle">vector, 768</text>
+  <text x="662" y="102" font-weight="bold" font-size="15">Linear + softmax</text>
+  <g font-size="13">
+    <text x="662" y="132">real</text>
+    <text x="662" y="158">openai</text>
+    <text x="662" y="184">google</text>
+    <text x="662" y="210">flux</text>
+    <text x="662" y="236">sdxl</text>
+    <text x="662" y="262">…</text>
   </g>
-  <text x="1189" y="122" text-anchor="middle" font-weight="bold" font-size="15">Verdict</text>
-  <text x="1189" y="148" text-anchor="middle" font-size="13">generated if any</text>
-  <text x="1189" y="165" text-anchor="middle" font-size="13">expert is above</text>
-  <text x="1189" y="182" text-anchor="middle" font-size="13">its threshold</text>
-  <text x="1189" y="210" text-anchor="middle" font-size="13">family: that expert</text>
-  <text x="1189" y="227" text-anchor="middle" font-size="13">model: its top class</text>
-  <text x="610" y="330" fill="#555">Expert: own copy of stage 4 → mean → norm → linear. 15M parameters, 25 ms on a CPU.</text>
-  <text x="30" y="330" fill="#555">p = 1 − P(real): the probability that the family made the image.</text>
+  <g>
+    <rect x="740" y="122" width="26" height="12" fill="#999"/>
+    <rect x="740" y="148" width="150" height="12" fill="#1f6fb2"/>
+    <rect x="740" y="174" width="18" height="12" fill="#999"/>
+    <rect x="740" y="200" width="8" height="12" fill="#999"/>
+    <rect x="740" y="226" width="5" height="12" fill="#999"/>
+  </g>
+  <text x="1123" y="124" text-anchor="middle" font-weight="bold" font-size="15">Verdict</text>
+  <text x="1123" y="152" text-anchor="middle">generated if</text>
+  <text x="1123" y="173" text-anchor="middle">1 − p(real) &gt; 0.5</text>
+  <text x="1123" y="208" text-anchor="middle">family: the largest</text>
+  <text x="1123" y="229" text-anchor="middle">of the other classes</text>
+  <text x="30" y="310" fill="#555">One softmax answers both questions: is the image generated, and by which family of generators (one maker or one architecture).</text>
+  <text x="30" y="332" fill="#555">There is no threshold beside the model: it sits in the bias of the class “real”.</text>
   <path d="M30 356 H1250" stroke="#ccc"/>
 
   <!-- (b) training -->
-  <text x="30" y="392" font-size="18" font-weight="bold">(b) Training: every expert on its own data</text>
+  <text x="30" y="392" font-size="18" font-weight="bold">(b) Training</text>
   <g stroke-width="1.5" fill="none">
-    <rect x="30" y="414" width="372" height="124" rx="4" stroke="#111"/>
-    <rect x="454" y="414" width="372" height="124" rx="4" stroke="#1f6fb2"/>
-    <rect x="878" y="414" width="372" height="124" rx="4" stroke="#1f6fb2"/>
-    <path d="M402 476 H452" stroke="#111" marker-end="url(#a)"/>
-    <path d="M826 476 H876" stroke="#111" marker-end="url(#a)"/>
+    <rect x="30" y="414" width="290" height="116" rx="4" stroke="#111"/>
+    <rect x="340" y="414" width="290" height="116" rx="4" stroke="#1f6fb2"/>
+    <rect x="650" y="414" width="290" height="116" rx="4" stroke="#1f6fb2"/>
+    <rect x="960" y="414" width="290" height="116" rx="4" stroke="#111"/>
   </g>
-  <text x="46" y="440" font-weight="bold" font-size="15">1. General expert “all”</text>
-  <text x="46" y="466">every generator against the reals</text>
-  <text x="46" y="488">trunk and expert trained together</text>
-  <text x="46" y="520" fill="#555">→ trunk.pt, experts/all.pt</text>
-  <text x="470" y="440" font-weight="bold" font-size="15" fill="#1f6fb2">2. Family experts, one at a time</text>
-  <text x="470" y="466">trunk frozen; expert starts as a copy of “all”</text>
-  <text x="470" y="488">its generators against the reals, nothing else</text>
-  <text x="470" y="520" fill="#555">→ experts/&lt;family&gt;.pt</text>
-  <text x="894" y="440" font-weight="bold" font-size="15" fill="#1f6fb2">3. Thresholds</text>
-  <text x="894" y="466">from held-out real images only</text>
-  <text x="894" y="488">the same share of false alarms for every expert,</text>
-  <text x="894" y="510">together at most 1 % of the reals</text>
-  <text x="30" y="574" fill="#555">Class 0 of every softmax is “real”, the other classes are the generators of the family: the expert that fires also names the exact model.</text>
-  <text x="30" y="596" fill="#555">A new family: add it to the config and train one more expert, the others stay as they are.</text>
-  <g font-size="13">
-    <path d="M1000 26 H1040" stroke="#111" stroke-width="1.5"/><text x="1048" y="30">shared, computed once</text>
-    <path d="M1000 46 H1040" stroke="#1f6fb2" stroke-width="1.5"/><text x="1048" y="50" fill="#1f6fb2">per family</text>
-  </g>
+  <text x="46" y="440" font-weight="bold" font-size="15">1. Cross-entropy</text>
+  <text x="46" y="466">over [ real, families ]:</text>
+  <text x="46" y="488">“generated or real” for every image</text>
+  <text x="46" y="510">+ “which family” for the generated</text>
+  <text x="356" y="440" font-weight="bold" font-size="15" fill="#1f6fb2">2. InfoNCE on z</text>
+  <text x="356" y="466">one class is pulled together,</text>
+  <text x="356" y="488">different classes are pushed apart;</text>
+  <text x="356" y="510">compared with the last 4096 vectors</text>
+  <text x="666" y="440" font-weight="bold" font-size="15" fill="#1f6fb2">3. Balance of generators</text>
+  <text x="666" y="466">a generator with n images: every</text>
+  <text x="666" y="488">image is drawn n^(−balance) as often,</text>
+  <text x="666" y="510">small generators are seen more</text>
+  <text x="976" y="440" font-weight="bold" font-size="15">4. Calibration</text>
+  <text x="976" y="466">the bias of “real” is set on</text>
+  <text x="976" y="488">held-out reals: about 1 % of them</text>
+  <text x="976" y="510">are above p = 0.5</text>
+  <text x="30" y="560" fill="#555">Black: always. <tspan fill="#1f6fb2">Blue: options, train.contrast and train.balance, off by default;</tspan> each variant is trained into runs/&lt;name&gt; and compared in runs/compare.md.</text>
 </svg>
